@@ -485,7 +485,7 @@ class PreflightTests(unittest.TestCase):
         rendered = scanner.render_json(report)
         self.assertNotIn(outside_value, rendered)
 
-    def test_req_011_complete_independently_approved_warning_suppression(self) -> None:
+    def test_req_011_complete_distinct_approver_warning_suppression(self) -> None:
         fixture = RepositoryFixture(self)
         firebase = synthetic_firebase_key()
         marker = (

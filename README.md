@@ -156,7 +156,8 @@ Only a warning can carry a line-scoped exception, using the complete marker belo
 vibeworthy:ignore <RULE_ID> reason="..." owner="..." approved-by="..." compensating-control="..." expires="2099-01-01"
 ```
 
-The owner and independent approver must differ, and the expiry must be a future ISO date. The
+The metadata must name different owner and approver identifiers, and the expiry must be a future ISO
+date. The scanner cannot verify organizational independence; record that evidence separately. The
 warning remains visible as suppressed and as a required manual check. A blocker, tool error, expired
 or incomplete marker, or exception without a compensating control remains active and cannot produce
 `GO`.
