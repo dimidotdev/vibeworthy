@@ -206,7 +206,7 @@ class PreflightTests(unittest.TestCase):
         for variable_name, rule_id in cases:
             with self.subTest(variable_name=variable_name):
                 fixture = RepositoryFixture(self)
-                synthetic_value = "PrivilegedSyntheticValue123456789"
+                synthetic_value = "!PrivilegedSyntheticValue123456789"
                 fixture.write(
                     f"{variable_name}={synthetic_value}",
                     f"{variable_name}={synthetic_value}\n",
@@ -220,6 +220,19 @@ class PreflightTests(unittest.TestCase):
                         self.assertNotIn(synthetic_value, completed.stderr)
                         self.assertIn(rule_id, completed.stdout)
                         self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_path_format_controls_are_escaped_in_every_format(self) -> None:
+        fixture = RepositoryFixture(self)
+        format_control = "\u202e"
+        firebase = synthetic_firebase_key()
+        fixture.write(f"safe{format_control}.js", f'const firebaseApiKey = "{firebase}";\n')
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(0, completed.returncode)
+                self.assertNotIn(format_control, completed.stdout)
+                self.assertIn("202e", completed.stdout.lower())
 
     def test_req_011_git_scope_env_and_skip_reasons(self) -> None:
         fixture = RepositoryFixture(self)
@@ -332,6 +345,7 @@ class PreflightTests(unittest.TestCase):
             "rules_version = '2';\nservice cloud.firestore { match /{document=**} { allow read, write: if true; } }\n",
         )
         fixture.write("database.rules.json", '{"rules": {".read": true, ".write": "true"}}\n')
+        fixture.write("database-tautology.rules", '{"rules": {".read": "true == true"}}\n')
         fixture.write(
             "storage.rules",
             "service firebase.storage { match /b/{bucket}/o { match /{allPaths=**} { "
@@ -350,9 +364,10 @@ class PreflightTests(unittest.TestCase):
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
         rule_findings = [finding for finding in report["findings"] if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"]
-        self.assertEqual(5, len(rule_findings))
+        self.assertEqual(6, len(rule_findings))
         self.assertEqual(
             {
+                "database-tautology.rules",
                 "database.rules.json",
                 "double-negation.rules",
                 "firestore.rules",
@@ -361,6 +376,24 @@ class PreflightTests(unittest.TestCase):
             },
             {finding["path"] for finding in rule_findings},
         )
+
+    def test_req_008_firebase_tautology_scan_is_bounded_on_long_failure(self) -> None:
+        scanner = load_scanner_module()
+        candidate = scanner.Candidate(
+            Path("firestore.rules"),
+            "firestore.rules",
+            None,
+            b"firestore.rules",
+        )
+        text = "allow read: if true" + (" " * 65_536) + "X"
+        findings: list[object] = []
+
+        started = time.perf_counter()
+        scanner._scan_text(candidate, text, findings)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0, f"Firebase rule scan took {elapsed:.3f}s")
+        self.assertEqual([], findings)
 
     def test_req_008_explicitly_disabled_supabase_rls_blocks(self) -> None:
         fixture = RepositoryFixture(self)
@@ -445,7 +478,9 @@ class PreflightTests(unittest.TestCase):
             f"{first_fetcher} https://invalid.example/one | env {shell}\n"
             f"{second_fetcher} https://invalid.example/two |\n {shell}\n"
             f"{first_fetcher} https://invalid.example/three | command {shell}\n"
-            f"{second_fetcher} https://invalid.example/four | \\\n {shell}\n",
+            f"{second_fetcher} https://invalid.example/four | \\\n {shell}\n"
+            f"{first_fetcher} 'https://invalid.example/five?a=1&b=2' | {shell}\n"
+            f"{second_fetcher} https://invalid.example/six | sudo -u root {shell}\n",
         )
 
         completed = self.run_scanner(fixture.root)
@@ -456,8 +491,8 @@ class PreflightTests(unittest.TestCase):
             for finding in report["findings"]
             if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
         ]
-        self.assertEqual(4, len(findings))
-        self.assertEqual({1, 2, 4, 5}, {finding["line"] for finding in findings})
+        self.assertEqual(6, len(findings))
+        self.assertEqual({1, 2, 4, 5, 7, 8}, {finding["line"] for finding in findings})
 
     def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
         fixture = RepositoryFixture(self)
@@ -466,7 +501,9 @@ class PreflightTests(unittest.TestCase):
         fixture.write(
             "download.sh",
             f"{fetcher} -o tool https://invalid.example/tool\n"
-            f"printf safe | {shell}\n",
+            f"printf safe | {shell}\n"
+            f"{fetcher} is only a word in this prose.\n"
+            f"echo local | {shell}\n",
         )
 
         completed = self.run_scanner(fixture.root)

@@ -456,10 +456,19 @@ _GENERIC_ASSIGNMENT_RE = re.compile(
 _CREDENTIAL_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s/:@]{1,128}:[^\s/@]{8,512}@")
 _PUBLIC_CLIENT_CREDENTIAL_RE = re.compile(
     r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
-    r"\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
+    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\s\"'`,;#]{12,4096})(?P=quote)"
 )
 _SERVICE_ROLE_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<name>\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*)\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
+    r"(?i)(?P<name>\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*)"
+    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\s\"'`,;#]{12,4096})(?P=quote)"
+)
+_PUBLIC_CLIENT_PATH_RE = re.compile(
+    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
+    r"\s*[:=]\s*[^/]{1,4096}"
+)
+_SERVICE_ROLE_PATH_RE = re.compile(
+    r"(?i)(?P<name>\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*)"
+    r"\s*[:=]\s*[^/]{1,4096}"
 )
 _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\bALTER\s+TABLE(?:\s+IF\s+EXISTS)?\s+(?:ONLY\s+)?"
@@ -469,21 +478,24 @@ _SUPABASE_RLS_DISABLED_RE = re.compile(
     re.IGNORECASE,
 )
 _FIREBASE_RTD_RULE_RE = re.compile(
-    r"[\"']?\.(?:read|write)[\"']?\s*:\s*(?:true|[\"']true[\"'])",
+    r"[\"']?\.(?:read|write)[\"']?[ \t\r\n]{0,64}:[ \t\r\n]{0,64}(?:true|"
+    r"(?P<quote>[\"'])[ \t\r\n]{0,256}(?:true(?:[ \t\r\n]{0,256}==[ \t\r\n]{0,256}true)?|"
+    r"false[ \t\r\n]{0,256}==[ \t\r\n]{0,256}false|"
+    r"(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){1,16}true|"
+    r"![ \t\r\n]{0,256}(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){0,15}false)"
+    r"[ \t\r\n]{0,256}(?P=quote))",
     re.IGNORECASE,
 )
 _FIREBASE_ALLOW_RE = re.compile(
-    r"\ballow\s+(?:(?:read|write|create|update|delete|get|list)\s*,?\s*)+\s*:\s*if\s*\(?\s*"
-    r"(?:true(?:\s*==\s*true)?|false\s*==\s*false|1\s*==\s*1|"
-    r"(?:!\s*!\s*)+true|!\s*(?:!\s*!\s*)*false)\s*\)?\s*;",
-    re.IGNORECASE,
-)
-_REMOTE_PIPE_RE = re.compile(
-    r"\b(?:curl|wget)\b[^|;&\r\n]{0,1000}"
-    r"(?:\\\r?\n[^|;&\r\n]{0,1000})*\|[ \t]*(?:\\[ \t]*)?(?:\r?\n[ \t]*)?"
-    r"(?:(?:(?:/[^/\s|]+)*/)?(?:command|env|exec|sudo)"
-    r"(?:[ \t]+(?:--|-[^\s|]+|[A-Za-z_][A-Za-z0-9_]*=[^\s|]+))*[ \t]+)*"
-    r"(?:(?:/[^/\s|]+)*/)?(?:ba|z|k|c)?sh\b",
+    r"\ballow[ \t\r\n]{1,64}(?:read|write|create|update|delete|get|list)"
+    r"(?:[ \t\r\n]{0,256},[ \t\r\n]{0,256}(?:read|write|create|update|delete|get|list))*"
+    r"[ \t\r\n]{0,256}:[ \t\r\n]{0,256}if[ \t\r\n]{0,256}\(?[ \t\r\n]{0,256}"
+    r"(?:true(?:[ \t\r\n]{0,256}==[ \t\r\n]{0,256}true)?|"
+    r"false[ \t\r\n]{0,256}==[ \t\r\n]{0,256}false|"
+    r"1[ \t\r\n]{0,256}==[ \t\r\n]{0,256}1|"
+    r"(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){1,16}true|"
+    r"![ \t\r\n]{0,256}(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){0,15}false)"
+    r"[ \t\r\n]{0,256}\)?[ \t\r\n]{0,256};",
     re.IGNORECASE,
 )
 _ACTION_USES_RE = re.compile(
@@ -509,12 +521,11 @@ def _safe_display_component(value: str) -> str:
     output: list[str] = []
     for character in value:
         code = ord(character)
+        category = unicodedata.category(character)
         if character == "\\":
             output.append("\\u005c")
-        elif code < 32 or code == 127:
-            output.append(f"\\x{code:02x}")
-        elif 0xD800 <= code <= 0xDFFF:
-            output.append(f"\\u{code:04x}")
+        elif code < 32 or code == 127 or category in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            output.append(f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}")
         else:
             output.append(character)
     safe = "".join(output)
@@ -529,7 +540,7 @@ def _safe_display_component(value: str) -> str:
     ):
         safe = pattern.sub("[REDACTED]", safe)
     safe = _CREDENTIAL_URL_RE.sub("[REDACTED-CREDENTIAL-URL]", safe)
-    for pattern in (_PUBLIC_CLIENT_CREDENTIAL_RE, _SERVICE_ROLE_ASSIGNMENT_RE):
+    for pattern in (_PUBLIC_CLIENT_PATH_RE, _SERVICE_ROLE_PATH_RE):
         safe = pattern.sub(
             lambda match: f"{match.group('name')}=[REDACTED]",
             safe,
@@ -944,6 +955,127 @@ def _action_is_pinned(reference: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{40}", revision))
 
 
+def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
+    """Yield shell-like logical lines without merging independent physical lines."""
+
+    parts: list[str] = []
+    start_line = 1
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not parts:
+            start_line = line_number
+        trimmed = line.rstrip()
+        trailing_backslashes = len(trimmed) - len(trimmed.rstrip("\\"))
+        backslash_continuation = trailing_backslashes % 2 == 1
+        if backslash_continuation:
+            trimmed = trimmed[:-1].rstrip()
+        parts.append(trimmed)
+        pipeline_continuation = trimmed.endswith(("|", "|&", "||"))
+        if backslash_continuation or pipeline_continuation:
+            continue
+        yield start_line, " ".join(parts)
+        parts = []
+    if parts:
+        yield start_line, " ".join(parts)
+
+
+def _shell_command_name(tokens: Sequence[str]) -> str | None:
+    index = 0
+    assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+    while index < len(tokens) and assignment.fullmatch(tokens[index]):
+        index += 1
+    wrappers = {"command", "env", "exec", "sudo"}
+    options_with_value = {
+        "env": {"-u", "--unset", "-C", "--chdir"},
+        "sudo": {
+            "-C",
+            "--chdir",
+            "-g",
+            "--group",
+            "-h",
+            "--host",
+            "-p",
+            "--prompt",
+            "-R",
+            "--chroot",
+            "-r",
+            "--role",
+            "-T",
+            "--command-timeout",
+            "-t",
+            "--type",
+            "-u",
+            "--user",
+            "-U",
+            "--other-user",
+        },
+    }
+    while index < len(tokens):
+        name = tokens[index].rsplit("/", 1)[-1].lower()
+        if name not in wrappers:
+            return name
+        index += 1
+        while index < len(tokens):
+            token = tokens[index]
+            if assignment.fullmatch(token) is not None:
+                index += 1
+                continue
+            if token == "--":
+                index += 1
+                break
+            if not token.startswith("-"):
+                break
+            option = token.split("=", 1)[0]
+            index += 1
+            if option in options_with_value.get(name, set()) and "=" not in token and index < len(tokens):
+                index += 1
+    return None
+
+
+def _pipeline_has_remote_shell(commands: Sequence[Sequence[str]]) -> bool:
+    names = [_shell_command_name(command) for command in commands]
+    fetchers = {"curl", "wget"}
+    shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
+    return any(
+        name in fetchers and any(later in shells for later in names[index + 1 :])
+        for index, name in enumerate(names)
+    )
+
+
+def _remote_pipe_line_numbers(text: str) -> list[int]:
+    findings: list[int] = []
+    for start_line, logical_command in _logical_shell_commands(text):
+        try:
+            lexer = shlex.shlex(logical_command, posix=True, punctuation_chars="|;&")
+            lexer.whitespace_split = True
+            lexer.commenters = "#"
+            tokens = list(lexer)
+        except ValueError:
+            continue
+
+        pipeline: list[list[str]] = []
+        command: list[str] = []
+
+        def finish_pipeline() -> None:
+            nonlocal pipeline, command
+            if command:
+                pipeline.append(command)
+            if len(pipeline) > 1 and _pipeline_has_remote_shell(pipeline):
+                findings.append(start_line)
+            pipeline = []
+            command = []
+
+        for token in tokens:
+            if token in {"|", "|&"}:
+                pipeline.append(command)
+                command = []
+            elif token and all(character in "|;&" for character in token):
+                finish_pipeline()
+            else:
+                command.append(token)
+        finish_pipeline()
+    return sorted(set(findings))
+
+
 def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict[str, object] | None:
     lines = text.splitlines()
     seen: set[tuple[str, int]] = set()
@@ -1021,8 +1153,8 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
     if service_account_type_line is not None and service_account_private_line is not None:
         add("VW-FIREBASE-SERVICE-ACCOUNT", service_account_private_line)
 
-    for match in _REMOTE_PIPE_RE.finditer(text):
-        add("VW-REMOTE-INSTALL-SCRIPT", text.count("\n", 0, match.start()) + 1)
+    for line_number in _remote_pipe_line_numbers(text):
+        add("VW-REMOTE-INSTALL-SCRIPT", line_number)
 
     if firebase_rule_file:
         for pattern in (_FIREBASE_RTD_RULE_RE, _FIREBASE_ALLOW_RE):
@@ -1056,8 +1188,12 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
     scripts = manifest.get("scripts")
     if isinstance(scripts, dict):
         for name in ("preinstall", "install", "postinstall", "prepare"):
-            if isinstance(scripts.get(name), str):
-                add("VW-INSTALL-SCRIPT", _line_for_json_key(lines, name))
+            script = scripts.get(name)
+            if isinstance(script, str):
+                script_line = _line_for_json_key(lines, name)
+                add("VW-INSTALL-SCRIPT", script_line)
+                if _remote_pipe_line_numbers(script):
+                    add("VW-REMOTE-INSTALL-SCRIPT", script_line)
     dependency_sections = ("dependencies", "devDependencies", "optionalDependencies")
     has_dependencies = any(isinstance(manifest.get(section), dict) and bool(manifest[section]) for section in dependency_sections)
     return {
