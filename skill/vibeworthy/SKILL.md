@@ -159,7 +159,9 @@ Do not omit a required field; use `unknown`, `unresolved`, or `not applicable â€
 In every `explore` or `prototype` Evidence section, use these explicit labels: `First cohort`,
 `Channel owner`, `Access mechanism`, `Handoff/message`, `Friction`, `Activation`, `Proposed threshold
 and rationale`, and `Stop or redesign`. Activation must name actor, action, object, precondition, and
-time window. A threshold rationale must explain why the number changes the decision.
+time window. Use the literal shape `Activation: [actor], after [precondition], completes [action] on
+[object] within [time window]`; do not treat an activation record without the `after` precondition as
+complete. A threshold rationale must explain why the number changes the decision.
 
 For every consequential choice, show `Option A`, `Option B`, `Chosen`, `Accepted cost`, and `Revisit
 trigger`, plus a decision matrix with one row each for user value, security/privacy risk, maintenance,

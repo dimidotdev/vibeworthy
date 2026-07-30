@@ -40,3 +40,18 @@ an explicit future approval gate.
 | 1 | `019fb41e-aafa-77d0-bf39-7baae46dfe01` | `920715cad776d5b487cef9c31c66409e2bc0eb929be7c6de19b5e5ceaf6a0bfb` |
 | 2 | `019fb41e-ab0a-7502-a227-6899aac79b2d` | `5282c4a6d6fe27c1d25f5453695258dbd556d1dc740165bfbac6a3978c7d2aef` |
 | 3 | `019fb41e-ab23-7623-b7d7-aca91072c3b2` | `46421a1e3455b4579ac9f95fe95caea0eccccea66a4a0ef8ecba6b32cab09107` |
+
+## Candidate `6854bc0` — rejected after F01
+
+Candidate `6854bc0a69efbf71e37634787a1d85c3cd3fa816` was rejected before its behavior suite could
+continue. An independent technical audit found that specialized credential values split across path
+components could still leak and that an unmatched shell quote could make the scanner exceed its
+bounded-work expectation. Its F01 behavior score was also only 2/3: run 1 did not state an explicit
+activation precondition. These responses are preserved as invalid evidence (with a single normalized
+terminal newline) and do not contribute to the release score.
+
+| Run | Session ID | SHA-256 | Result |
+| --- | --- | --- | --- |
+| 1 | `019fb438-a3e5-72c1-8434-55c1c38c845a` | `ff4b6fe4c7e93e0c27ecf3e73c73645dd15593329c21fd2f2cbc52319a9e8a5d` | FAIL |
+| 2 | `019fb438-a3fb-7041-9284-6083b16b0014` | `0a53f71cd8dbbe2891773cae3f1fe344b569400f8003af900a7f74567d4707df` | PASS |
+| 3 | `019fb438-a40f-74d1-b473-02e0477f7558` | `f99f013946dc25b2f313f701654371adbd76807ec53e26d60daca0f3bd831750` | PASS |

