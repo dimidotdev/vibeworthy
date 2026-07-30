@@ -110,7 +110,22 @@ Before public release, manually review dependency identity and necessity, instal
 
 ## Issue an evidence-based recommendation
 
-Separate automated passes, failures, tool errors, manual checks, and residual risks. Name the artifact, scope, environment, policy, evidence, owner, and next action.
+### Mandatory release ledger — never omit or replace
+
+For every release recommendation, including an obvious `NO-GO`, first print one compact identity line
+with `Artifact`, `Scope`, `Environment`, `Policy`, and `Evidence cutoff`; use `unknown` or `unresolved`
+instead of omitting a value. Then print this Markdown ledger with these exact columns:
+
+| Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |
+| --- | --- | --- | --- | --- | --- | --- |
+| `[automated pass / failure / tool error / manual check / residual risk / exception]` | `[one gate or fact]` | `[pass / fail / tool error / unresolved / accepted]` | `[observed artifact or missing evidence]` | `[specific remaining risk or none observed in scope]` | `[named person/role or unknown]` | `[specific next action or none]` |
+
+Replace the example row; never leave placeholders. Bullets, prose, or a blocker list do not replace
+this ledger, even when the user asks for brevity. Give every distinct failure, tool error, required
+manual check (passed or unresolved), and residual risk its own row; do not merge items with different
+evidence, owners, or actions. Every non-pass row requires an owner and concrete next action; use
+`unknown — assign owner` when needed, but treat it as an unresolved ownership blocker that cannot
+support `GO`. Keep cells short and link to detailed evidence when available.
 
 Return exactly one recommendation when release is in scope:
 

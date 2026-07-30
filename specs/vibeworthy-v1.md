@@ -185,9 +185,14 @@ while linking to the full references for manual use.
   preserve a single immutable lockfile, inspect install scripts and vulnerability/KEV output, generate
   a transitive SBOM for public releases, define patch ownership/SLA, prefer short-lived CI identity,
   pin third-party automation by immutable digest/SHA, verify build-artifact provenance/digest, and block
-  arbitrary packages or remote scripts added only because generated instructions requested them. A
+  arbitrary packages or remote scripts added only because generated instructions requested them. The
+  durable public release shall use the exact independently evaluated commit as its tag target, attest
+  a checksum index that binds exactly the ZIP, SBOM, manifest, and archive-provenance bundle, and
+  upload only those four indexed assets plus the checksum index and its own verified attestation as
+  workflow-managed release assets. Host-generated source snapshots remain outside that inventory. A
   known-exploited vulnerability above policy, missing/incomplete SBOM, unpinned release automation,
-  invalid provenance/signature, digest mismatch, or unsupported dependency shall fail the `ship` gate.
+  invalid provenance/signature, digest mismatch, candidate/release identity mismatch, or unsupported
+  dependency shall fail the `ship` gate.
 - REQ-010 | must | The repository shall include a dependency-free Python preflight that scans locally,
   redacts matched values, detects high-confidence secret/env/client-key and unsafe-rule patterns,
   checks lockfile hygiene, supports text, JSON, and SARIF output, and returns stable documented exit
@@ -200,9 +205,11 @@ while linking to the full references for manual use.
   and allow only warning suppressions carrying reason, owner, independent approver, compensating
   control, and future expiry; suppressions remain scanner-visible and do not change release evidence,
   while blockers and tool errors shall not be suppressible or waivable to `GO`.
-- REQ-012 | must | Before a `ship` recommendation, the skill shall produce a plain-language evidence
-  table with automated passes, failures, manual checks, residual risks, owner, and next action, and
-  shall return `NO-GO` for unresolved secrets, authorization, destructive-data, payment, critical
+- REQ-012 | must | Before every `ship` recommendation, including `NO-GO`, the skill shall identify the
+  artifact, scope, environment, policy, and evidence cutoff and produce the mandatory seven-column
+  evidence ledger separating automated passes, failures, tool errors, manual checks, residual risks,
+  owners, and next actions; prose or bullets shall not replace it. It shall return `NO-GO` for
+  unresolved secrets, authorization, destructive-data, payment, critical
   dependency, tool-error, or required-manual-check findings; `CONDITIONAL` shall permit only noncritical
   exceptions with reason, independent approver, compensating control, owner, and future expiry, while
   `GO` shall mean every required gate passed in the named artifact, scope, environment, and policy.
@@ -272,8 +279,9 @@ while linking to the full references for manual use.
 - AC-009 | REQ-009 | Given lockfile conflict and an install script, when reviewed, then both issues are
   visible and installation is deferred until identity, necessity, permissions, and source are
   confirmed; a public-release review additionally records SBOM, vulnerability/KEV, pinning, patch SLA,
-  provenance/signature, digest, and CI identity/branch-control evidence, and every enumerated failure
-  condition produces `NO-GO`.
+  provenance/signature, digest, exact evaluated-commit/annotated-tag identity, an attested checksum
+  index over four named assets, the exact six-file workflow-managed durable release inventory, and CI
+  identity/branch-control evidence, and every enumerated failure condition produces `NO-GO`.
 - AC-010 | REQ-010 | Given scanner fixtures, when run cross-platform, then output and exit codes are
   deterministic, schemas parse, the fixtures remain byte-identical, and text/JSON/SARIF expose the
   non-atomic snapshot limitation.
@@ -283,8 +291,9 @@ while linking to the full references for manual use.
   that history/submodules were not scanned, and blocker suppression or warning suppression without
   reason, owner, independent approver, compensating control, and future expiry fails.
 - AC-012 | REQ-012 | Given unresolved cross-user authorization, when launch review completes, then the
-  result is `NO-GO`, the clean UI pass remains visible, and an owner/action is named; no tool error or
-  required manual check can result in `GO`.
+  result is `NO-GO`, the release identity and exact seven-column ledger remain visible, the clean UI
+  pass remains distinct, and every failure, tool error, manual check, or residual risk has its own
+  owner/action row; no tool error or required manual check can result in `GO`.
 - AC-013 | REQ-013 | Given release text, when claim review runs, then unsupported absolute claims are
   absent, including security, compliance, profitability, and readiness language.
 - AC-014 | REQ-014 | Given the repository, when install guidance is checked, then every claimed path
@@ -404,10 +413,10 @@ while linking to the full references for manual use.
 ## Rollout and Rollback
 
 - Rollout: complete license/source audit; pass a critical independent review; implement and forward-test
-  locally; create a public GitHub repository; run cross-platform CI; record the release commit SHA and
-  create `v1.0.0`; verify the tag still resolves to that SHA plus Lovable/Bolt import shape and the v0
-  adapter manually; back up production D1; publish the localized article/project; deploy the site; run
-  production smokes.
+  locally; create a public GitHub repository; run cross-platform CI; create annotated `v1.0.0` directly
+  on the exact evaluated commit; verify the tag target, checksums, attestations, durable release asset
+  set, Lovable/Bolt import shape, and v0 adapter manually; back up production D1; publish the localized
+  article/project; deploy the site; run production smokes.
 - Stop conditions: secret-like material in history or output, failed independent security review,
   invalid licensing/provenance, platform instructions contradicted by official docs, failing scanner
   redaction/mutation tests, failed site CI/migration, or unsupported security/readiness claims.
@@ -445,6 +454,26 @@ while linking to the full references for manual use.
   path identity checks close every TOCTOU window: a hostile local writer can swap and restore a tree
   entirely between samples. DEC-012 narrows the portable scanner's assurance boundary, makes the
   non-atomic view machine-visible, and requires a quiescent isolated checkout for release evidence.
+- AUDIT-HIST-006 | failed | The 2026-07-30 independent scanner audit rejected candidate
+  `8fbce1329355f428dcf451d2e29431f5a1f87f04` after
+  reproducing a redaction-sentinel path disclosure, untrusted Git execution through a PATH symlink,
+  shell-wrapper and npm-lifecycle evasions, content-skip loss of tracked `.env` classification, an
+  ASCII-output failure, incomplete Firebase tautology detection, and semantically empty suppression
+  identities. The candidate remains excluded from release scoring; each case requires a synthetic
+  regression on the next exact candidate. Evidence: `docs/audits/2026-07-30-candidate-8fbce132.md`.
+- AUDIT-HIST-007 | failed | The 2026-07-30 independent behavior audit rejected candidate
+  `8fbce1329355f428dcf451d2e29431f5a1f87f04`
+  because six fresh hostile release prompts produced the correct `NO-GO` but omitted REQ-012's
+  mandatory evidence ledger, identity, owner, or next-action fields. Correct blocking without the
+  auditable decision record does not count as a pass; the next candidate requires fresh probes.
+  Evidence: `docs/audits/2026-07-30-candidate-8fbce132.md`; raw outputs were not retained or scored.
+- AUDIT-HIST-008 | failed | The 2026-07-30 independent package audit rejected candidate
+  `8fbce1329355f428dcf451d2e29431f5a1f87f04`
+  because it allowed a descendant release commit, ran inline Python without isolated imports in an
+  OIDC job, attested only the ZIP instead of the checksum-bound asset set, and produced only an
+  expiring workflow artifact rather than a durable tag-gated GitHub Release. DEC-013 records the
+  stricter evaluated-commit identity rule; the next candidate requires a new package audit and actual
+  release evidence before publication. Evidence: `docs/audits/2026-07-30-candidate-8fbce132.md`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -469,13 +498,16 @@ while linking to the full references for manual use.
   actor matrices, and launch blocking.
 - TEST-009 | planned | Behavior-test lockfile/install-script review plus closed failure on KEV, missing
   or incomplete SBOM, unsupported dependency, mutable automation, invalid provenance/signature, and
-  artifact digest mismatch.
+  artifact digest mismatch; workflow-test `R == C`, annotated-tag identity, isolated privileged
+  scripts, attestation of `SHA256SUMS`, its exact four-entry inventory, tag-only promotion, and
+  publication of exactly the six verified assets.
 - TEST-010 | planned | Run scanner unit/integration tests and mutation hashes on Python 3.11 for Linux,
   Windows, and macOS.
 - TEST-011 | planned | Unit-test inclusion/exclusion, git state, key classification, size/binary skips,
   symlink boundaries, and suppression rationale.
-- TEST-012 | planned | Forward-test a clean UI with unresolved authorization and require `NO-GO` plus
-  owner/action.
+- TEST-012 | planned | Forward-test a clean UI with unresolved authorization and require release
+  identity, the exact seven-column ledger, separate rows for every failure/tool error/manual check/
+  residual risk, owner/action per non-pass row, and `NO-GO`.
 - TEST-013 | planned | Lint repository/article claims and complete an independent editorial review.
 - TEST-014 | planned | Verify current official platform installation docs and validate each distributed
   path/adapter shape without claiming v0 native Agent Skill support.
@@ -567,6 +599,12 @@ while linking to the full references for manual use.
   snapshot across Linux, macOS, and Windows. Release scans therefore require a quiescent isolated
   checkout on a trusted runner, and every structured format exposes `atomic_snapshot: false` plus
   `release_evidence_requires_quiescent_isolated_checkout: true`. | affects: REQ-010, REQ-011, REQ-013
+- DEC-013 | Require the public release tag target R to equal the independently evaluated candidate C
+  exactly. | rationale: comparing only the skill subtree of a descendant commit does not bind changes
+  to release automation, manifests, SBOM generation, or publication logic; tagging C directly makes
+  the reviewed repository state and distributed source identity unambiguous. Post-release evidence
+  may be recorded in a later documentation commit without changing the tag. | affects: REQ-009,
+  REQ-014, REQ-021
 
 ## Open Questions
 

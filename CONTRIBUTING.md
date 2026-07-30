@@ -59,6 +59,24 @@ unnecessary generated files, misleading assurance language, and mutable dependen
   readiness.
 - Update [`docs/provenance.md`](docs/provenance.md) when a source materially informs the work.
 
+### Release maintainer procedure
+
+1. Freeze one full candidate commit SHA and run cross-platform CI, independent review, and the
+   forward-test protocol against that exact repository state. Any change creates a new candidate.
+2. Keep the `github-release` environment restricted to the intended tag policy. Run the release
+   workflow manually with the candidate SHA and version to exercise build and attestation only;
+   `workflow_dispatch` must never publish.
+3. After every required gate passes, create an annotated SemVer tag directly on that same commit. Its
+   message must contain exactly one `VibeWorthy-Candidate-Commit: <FULL_SHA>` trailer, then push only
+   that tag. Never substitute a descendant commit, even when the skill subtree is unchanged.
+4. The tag workflow must verify the ZIP, SBOM, release manifest, and ZIP-provenance bundle listed in
+   `SHA256SUMS`; separately verify the checksum-index provenance bundle; and confirm that those four
+   indexed assets plus `SHA256SUMS` and its provenance bundle are the exact six workflow-managed
+   release assets. Verify both attestations against the expected repository, workflow signer, source
+   commit, and tag ref before creating the durable GitHub Release. Do not replace existing assets.
+5. Record resulting run, release, digest, and attestation identifiers in post-release evidence without
+   moving or rewriting the evaluated tag.
+
 ## Licensing and provenance
 
 Contributions must be compatible with the MIT license and must be yours to submit. Write original

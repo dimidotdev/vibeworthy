@@ -360,6 +360,12 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn("full_commit_sha", lowered)
         self.assertIn("native public-github skill import", lowered)
         self.assertIn("native agent skills package import", flattened)
+        self.assertIn("the release workflow is configured to publish", flattened)
+        self.assertIn("intended release contract", flattened)
+        self.assertIn("checksum-index attestation", flattened)
+        self.assertIn("verify the zip separately with its archive-provenance bundle", flattened)
+        self.assertIn("outside the workflow-managed six-file inventory", flattened)
+        self.assertNotIn("planned canonical repository", flattened)
 
     def test_provenance_and_license_boundaries(self) -> None:
         provenance = read_text(REPOSITORY_ROOT / "docs" / "provenance.md").lower()
@@ -399,12 +405,28 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn("python -m unittest discover", workflow)
         self.assertRegex(workflow, r"(?m)^\s+contents:\s+read\s*$")
 
-        action_revisions = re.findall(r"(?m)^\s*uses:\s*[^@\s]+@([^\s#]+)", workflow)
-        self.assertGreaterEqual(len(action_revisions), 2)
-        self.assertTrue(
-            all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in action_revisions),
-            f"all GitHub Actions must use immutable full SHAs: {action_revisions}",
+        expected_actions = {
+            "actions/checkout": (
+                "3d3c42e5aac5ba805825da76410c181273ba90b1",
+                "v7.0.1",
+            ),
+            "actions/setup-python": (
+                "5fda3b95a4ea91299a34e894583c3862153e4b97",
+                "v7.0.0",
+            ),
+        }
+        uses = re.findall(
+            r"(?m)^\s*uses:\s*([^@\s]+)@([^\s#]+)(?:\s+#\s*(.*))?$",
+            workflow,
         )
+        self.assertEqual(set(expected_actions), {action for action, _, _ in uses})
+        self.assertEqual(len(expected_actions), len(uses))
+        for action, revision, comment in uses:
+            expected_revision, expected_version = expected_actions[action]
+            self.assertRegex(revision, r"^[0-9a-f]{40}$")
+            self.assertEqual(expected_revision, revision)
+            self.assertIn(expected_version, comment)
+            self.assertIn("official GitHub API 2026-07-30", comment)
 
 
 if __name__ == "__main__":

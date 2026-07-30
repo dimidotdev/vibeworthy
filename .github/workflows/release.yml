@@ -22,6 +22,13 @@ jobs:
     name: Reproduce and attest the skill archive
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      candidate_commit: ${{ steps.prepare.outputs.candidate_commit }}
+      release_commit: ${{ steps.prepare.outputs.release_commit }}
+      tag_name: ${{ steps.prepare.outputs.tag_name }}
+      version: ${{ steps.prepare.outputs.version }}
     permissions:
       contents: read
       id-token: write
@@ -103,8 +110,8 @@ jobs:
             echo "Candidate identity does not name a commit object." >&2
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$candidate_commit" "$release_commit"; then
-            echo "Candidate commit must be an ancestor of the release commit." >&2
+          if [[ "$candidate_commit" != "$release_commit" ]]; then
+            echo "Candidate commit must exactly match the release commit and tag target." >&2
             exit 1
           fi
 
@@ -155,7 +162,7 @@ jobs:
           export SKILL_TREE="$candidate_tree"
           export TAG_NAME="$tag_name"
           export VERSION="$version"
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           from __future__ import annotations
 
           from datetime import datetime, timezone
@@ -298,7 +305,7 @@ jobs:
           PY
 
       - name: Generate GitHub build provenance for the ZIP
-        id: attest
+        id: attest_archive
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1, official GitHub API 2026-07-30
         with:
           subject-path: ${{ steps.prepare.outputs.archive_path }}
@@ -311,9 +318,9 @@ jobs:
           ARCHIVE_NAME: ${{ steps.prepare.outputs.archive_name }}
           ARCHIVE_PATH: ${{ steps.prepare.outputs.archive_path }}
           ASSET_DIR: ${{ steps.prepare.outputs.asset_dir }}
-          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
-          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          ATTESTATION_BUNDLE: ${{ steps.attest_archive.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest_archive.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest_archive.outputs.attestation-url }}
           CANDIDATE_COMMIT: ${{ steps.prepare.outputs.candidate_commit }}
           RELEASE_COMMIT: ${{ steps.prepare.outputs.release_commit }}
           SBOM_DIGEST: ${{ steps.prepare.outputs.sbom_digest }}
@@ -329,7 +336,7 @@ jobs:
           export LC_ALL=C
           export TZ=UTC
 
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           from __future__ import annotations
 
           import hashlib
@@ -444,8 +451,11 @@ jobs:
 
           output_path = Path(require_environment("GITHUB_OUTPUT"))
           values = {
+              "checksums_name": checksums_path.name,
               "checksums_path": str(checksums_path),
+              "manifest_name": manifest_path.name,
               "manifest_path": str(manifest_path),
+              "provenance_name": bundle_path.name,
               "provenance_path": str(bundle_path),
           }
           with output_path.open("a", encoding="utf-8", newline="\n") as output:
@@ -455,7 +465,35 @@ jobs:
                   output.write(f"{name}={value}\n")
           PY
 
+      - name: Generate GitHub build provenance for SHA256SUMS
+        id: attest_checksums
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1, official GitHub API 2026-07-30
+        with:
+          subject-path: ${{ steps.describe.outputs.checksums_path }}
+
+      - name: Stage the checksum provenance bundle
+        id: stage_checksums_attestation
+        shell: bash
+        env:
+          ASSET_DIR: ${{ steps.prepare.outputs.asset_dir }}
+          ATTESTATION_BUNDLE: ${{ steps.attest_checksums.outputs.bundle-path }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ ! -f "$ATTESTATION_BUNDLE" ]]; then
+            echo "Checksum attestation action did not produce a provenance bundle." >&2
+            exit 1
+          fi
+          checksums_provenance_name="vibeworthy-v${VERSION}.checksums.provenance.jsonl"
+          checksums_provenance_path="$ASSET_DIR/$checksums_provenance_name"
+          install -m 0644 "$ATTESTATION_BUNDLE" "$checksums_provenance_path"
+          printf 'checksums_provenance_name=%s\n' "$checksums_provenance_name" >> "$GITHUB_OUTPUT"
+          printf 'checksums_provenance_path=%s\n' "$checksums_provenance_path" >> "$GITHUB_OUTPUT"
+
       - name: Upload the exact release assets
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, official GitHub API 2026-07-30
         with:
           name: vibeworthy-v${{ steps.prepare.outputs.version }}-release-assets
@@ -465,7 +503,237 @@ jobs:
             ${{ steps.describe.outputs.manifest_path }}
             ${{ steps.describe.outputs.provenance_path }}
             ${{ steps.describe.outputs.checksums_path }}
+            ${{ steps.stage_checksums_attestation.outputs.checksums_provenance_path }}
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: false
           retention-days: 30
+
+  promote:
+    name: Promote verified tag assets to GitHub Release
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: github-release
+    permissions:
+      attestations: read
+      contents: write
+
+    steps:
+      - name: Download the exact build artifact by ID
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1, official GitHub API 2026-07-30
+        with:
+          artifact-ids: ${{ needs.release.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release-assets
+          digest-mismatch: error
+
+      - name: Verify the release asset set, checksums, and manifest
+        shell: bash
+        env:
+          ASSET_DIR: ${{ runner.temp }}/release-assets
+          RELEASE_COMMIT: ${{ needs.release.outputs.release_commit }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export LC_ALL=C
+          export TZ=UTC
+
+          python3 -I - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+
+          def require_environment(name: str) -> str:
+              value = os.environ.get(name, "")
+              if not value:
+                  raise SystemExit(f"missing required environment value: {name}")
+              return value
+
+
+          asset_dir = Path(require_environment("ASSET_DIR"))
+          release_commit = require_environment("RELEASE_COMMIT")
+          tag_name = require_environment("TAG_NAME")
+          version = require_environment("VERSION")
+          if tag_name != f"v{version}":
+              raise SystemExit("promotion tag and release version differ")
+          if not re.fullmatch(r"[0-9a-f]{40}", release_commit):
+              raise SystemExit("promotion release commit is not a full lowercase SHA")
+
+          archive_name = f"vibeworthy-v{version}.zip"
+          sbom_name = f"vibeworthy-v{version}.sbom.cdx.json"
+          manifest_name = f"vibeworthy-v{version}.manifest.json"
+          provenance_name = f"vibeworthy-v{version}.provenance.jsonl"
+          checksums_name = "SHA256SUMS"
+          checksums_provenance_name = f"vibeworthy-v{version}.checksums.provenance.jsonl"
+          expected_names = {
+              archive_name,
+              sbom_name,
+              manifest_name,
+              provenance_name,
+              checksums_name,
+              checksums_provenance_name,
+          }
+          entries = list(asset_dir.iterdir())
+          if any(path.is_symlink() or not path.is_file() for path in entries):
+              raise SystemExit("downloaded artifact contains a non-regular asset")
+          actual_names = {path.name for path in entries}
+          if actual_names != expected_names:
+              raise SystemExit("downloaded artifact does not contain the exact release asset set")
+
+          checksums_path = asset_dir / checksums_name
+          checksum_lines = checksums_path.read_text(encoding="utf-8").splitlines()
+          expected_checksum_names = sorted(
+              (archive_name, manifest_name, provenance_name, sbom_name)
+          )
+          if len(checksum_lines) != len(expected_checksum_names):
+              raise SystemExit("SHA256SUMS does not contain exactly four anchored assets")
+          observed_checksum_names: list[str] = []
+          observed_digests: dict[str, str] = {}
+          for line in checksum_lines:
+              match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9.+_-]+)", line)
+              if match is None:
+                  raise SystemExit("SHA256SUMS contains an invalid entry")
+              digest, name = match.groups()
+              observed_checksum_names.append(name)
+              observed_digests[name] = digest
+          if observed_checksum_names != expected_checksum_names:
+              raise SystemExit("SHA256SUMS inventory or ordering is invalid")
+          for name, expected_digest in observed_digests.items():
+              actual_digest = hashlib.sha256((asset_dir / name).read_bytes()).hexdigest()
+              if actual_digest != expected_digest:
+                  raise SystemExit(f"checksum mismatch for release asset: {name}")
+
+          manifest = json.loads((asset_dir / manifest_name).read_text(encoding="utf-8"))
+          release_identity = manifest.get("release_identity", {})
+          if (
+              manifest.get("schema_version") != "1.0"
+              or manifest.get("name") != "vibeworthy"
+              or manifest.get("version") != version
+              or release_identity.get("candidate_commit") != release_commit
+              or release_identity.get("release_commit") != release_commit
+              or release_identity.get("tag") != tag_name
+          ):
+              raise SystemExit("release manifest identity does not match the promotion target")
+          archive = manifest.get("archive", {})
+          if (
+              archive.get("name") != archive_name
+              or archive.get("root") != "vibeworthy/"
+              or archive.get("sha256") != observed_digests[archive_name]
+              or archive.get("size_bytes") != (asset_dir / archive_name).stat().st_size
+          ):
+              raise SystemExit("release manifest archive record is invalid")
+          sbom = manifest.get("sbom", {})
+          if (
+              sbom.get("name") != sbom_name
+              or sbom.get("format") != "CycloneDX"
+              or sbom.get("spec_version") != "1.6"
+              or sbom.get("sha256") != observed_digests[sbom_name]
+          ):
+              raise SystemExit("release manifest SBOM record is invalid")
+          provenance = manifest.get("provenance", {})
+          if (
+              provenance.get("subject_name") != archive_name
+              or provenance.get("subject_sha256") != observed_digests[archive_name]
+              or provenance.get("bundle_name") != provenance_name
+              or provenance.get("bundle_sha256") != observed_digests[provenance_name]
+              or not provenance.get("attestation_id")
+              or not provenance.get("attestation_url")
+          ):
+              raise SystemExit("release manifest provenance record is invalid")
+          workflow = manifest.get("workflow", {})
+          if (
+              workflow.get("event") != "push"
+              or workflow.get("ref") != f"refs/tags/{tag_name}"
+              or workflow.get("repository") != require_environment("GITHUB_REPOSITORY")
+              or workflow.get("run_id") != require_environment("GITHUB_RUN_ID")
+          ):
+              raise SystemExit("release manifest workflow record is invalid")
+          PY
+
+      - name: Verify both GitHub attestations and the current annotated tag
+        shell: bash
+        env:
+          ASSET_DIR: ${{ runner.temp }}/release-assets
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ needs.release.outputs.release_commit }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          archive_path="$ASSET_DIR/vibeworthy-v${VERSION}.zip"
+          archive_bundle="$ASSET_DIR/vibeworthy-v${VERSION}.provenance.jsonl"
+          checksums_path="$ASSET_DIR/SHA256SUMS"
+          checksums_bundle="$ASSET_DIR/vibeworthy-v${VERSION}.checksums.provenance.jsonl"
+          signer_workflow="github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml"
+
+          gh attestation verify "$archive_path" \
+            --bundle "$archive_bundle" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$RELEASE_COMMIT" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners
+          gh attestation verify "$checksums_path" \
+            --bundle "$checksums_bundle" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$RELEASE_COMMIT" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners
+
+          tag_object_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" --jq '.object.type')"
+          tag_object_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" --jq '.object.sha')"
+          if [[ "$tag_object_type" != "tag" ]] || [[ ! "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Promotion requires the same annotated release tag verified by the build job." >&2
+            exit 1
+          fi
+          tag_target_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.object.type')"
+          tag_target_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.object.sha')"
+          if [[ "$tag_target_type" != "commit" ]] || [[ "$tag_target_sha" != "$RELEASE_COMMIT" ]]; then
+            echo "The annotated tag moved or no longer targets the attested release commit." >&2
+            exit 1
+          fi
+
+      - name: Publish the durable GitHub Release
+        shell: bash
+        env:
+          ASSET_DIR: ${{ runner.temp }}/release-assets
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "A GitHub Release already exists for this tag; refusing to replace its assets." >&2
+            exit 1
+          fi
+          release_notes="Install vibeworthy-v${VERSION}.zip and verify it with SHA256SUMS plus the included GitHub attestations. GitHub's automatically generated Source code archives are repository snapshots, not the attested Agent Skill package."
+          release_args=(
+            "$TAG_NAME"
+            "$ASSET_DIR/vibeworthy-v${VERSION}.zip"
+            "$ASSET_DIR/vibeworthy-v${VERSION}.sbom.cdx.json"
+            "$ASSET_DIR/vibeworthy-v${VERSION}.manifest.json"
+            "$ASSET_DIR/vibeworthy-v${VERSION}.provenance.jsonl"
+            "$ASSET_DIR/SHA256SUMS"
+            "$ASSET_DIR/vibeworthy-v${VERSION}.checksums.provenance.jsonl"
+            --repo "$GITHUB_REPOSITORY"
+            --verify-tag
+            --title "$TAG_NAME"
+            --notes "$release_notes"
+          )
+          precedence_version="${VERSION%%+*}"
+          if [[ "$precedence_version" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "${release_args[@]}"

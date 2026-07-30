@@ -533,8 +533,11 @@ _SUPABASE_RLS_DISABLED_RE = re.compile(
     re.IGNORECASE,
 )
 _FIREBASE_TRUE_EXPRESSION = (
-    r"(?:true(?: *== *true)?|false *== *false|1 *== *1|"
+    r"(?:true(?: *== *true)?|false *== *false|[+-]?[0-9]{1,32} *== *[+-]?[0-9]{1,32}|"
     r"(?:! *! *){1,16}true|! *(?:! *! *){0,15}false)"
+)
+_FIREBASE_INTEGER_EQUALITY_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])([+-]?[0-9]{1,32}) *== *([+-]?[0-9]{1,32})(?![A-Za-z0-9_.])"
 )
 _FIREBASE_OPEN_PARENS = r"(?:\( *)*"
 _FIREBASE_CLOSE_PARENS = r"(?: *\))*"
@@ -1082,7 +1085,7 @@ def _redact_content_values_from_paths(
     longest = [0]
     for raw_value in values:
         value = _safe_display_component(raw_value)
-        if not value or value == "." or "[REDACTED]" in value:
+        if not value or value == ".":
             continue
         state = 0
         for character in value:
@@ -1196,11 +1199,14 @@ def _resolve_git_executable(cwd: Path) -> str:
         if not candidate_path.is_absolute():
             continue
         try:
+            lexical_candidate = Path(os.path.abspath(os.fspath(candidate_path)))
             resolved_candidate = candidate_path.resolve(strict=True)
             candidate_stat = resolved_candidate.stat()
-        except OSError:
+        except (OSError, ValueError):
             continue
         if not stat.S_ISREG(candidate_stat.st_mode):
+            continue
+        if _contains_path(resolved_cwd, lexical_candidate):
             continue
         candidate_parent = resolved_candidate.parent
         if _contains_path(resolved_cwd, resolved_candidate) or _contains_path(
@@ -1795,12 +1801,24 @@ def _is_known_specialized_value(value: str) -> bool:
     return False
 
 
-def _line_for_json_key(lines: Sequence[str], key: str) -> int:
-    pattern = re.compile(rf"^\s*[\"']{re.escape(key)}[\"']\s*:")
-    for index, line in enumerate(lines, start=1):
-        if pattern.search(line):
-            return index
-    return 1
+def _line_numbers_for_json_keys(lines: Sequence[str], keys: set[str]) -> dict[str, int]:
+    """Locate decoded JSON object keys in one bounded pass for diagnostic lines."""
+
+    remaining = set(keys)
+    result: dict[str, int] = {}
+    key_pattern = re.compile(r'"(?P<key>(?:\\.|[^"\\])*)"\s*:')
+    for line_number, line in enumerate(lines, start=1):
+        if not remaining:
+            break
+        for match in key_pattern.finditer(line):
+            try:
+                key = json.loads(f'"{match.group("key")}"')
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(key, str) and key in remaining:
+                result[key] = line_number
+                remaining.remove(key)
+    return result
 
 
 def _is_firebase_rules_path(display_path: str) -> bool:
@@ -1978,7 +1996,7 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
 
     index = 0
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
-    while index < len(current_tokens) and current_tokens[index] in {"(", "{"}:
+    while index < len(current_tokens) and current_tokens[index] in {"(", "{", "!"}:
         index += 1
     while index < len(current_tokens) and assignment.fullmatch(current_tokens[index]):
         index += 1
@@ -2006,6 +2024,17 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
     }
     env_options_with_value = {"-u", "--unset", "-C", "--chdir", "-a", "--argv0"}
     timeout_options_with_value = {"-k", "--kill-after", "-s", "--signal"}
+    time_options_with_value = {"-f", "--format", "-o", "--output"}
+    time_options_without_value = {
+        "-a",
+        "--append",
+        "-p",
+        "--portability",
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+    }
 
     while index < len(current_tokens):
         wrapper_index = index
@@ -2019,7 +2048,7 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
                     applet_index,
                 )
             return _CommandInvocation(current_tokens, name, wrapper_index)
-        if name not in {"command", "env", "exec", "sudo", "nohup", "timeout"}:
+        if name not in {"command", "env", "exec", "sudo", "nohup", "time", "timeout"}:
             return _CommandInvocation(current_tokens, name, index)
         index += 1
 
@@ -2111,6 +2140,26 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
                 index += 1
             elif index < len(current_tokens) and current_tokens[index].startswith("-"):
                 return _CommandInvocation(current_tokens, "nohup", wrapper_index)
+            continue
+
+        if name == "time":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                option = argument.split("=", 1)[0]
+                if option not in time_options_with_value and option not in time_options_without_value:
+                    return _CommandInvocation(current_tokens, None, None, False)
+                index += 1
+                if (
+                    option in time_options_with_value
+                    and "=" not in argument
+                    and index < len(current_tokens)
+                ):
+                    index += 1
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
             continue
 
         if name == "timeout":
@@ -2710,12 +2759,6 @@ def _scan_text(
             )
             seen.add(key)
 
-    if _is_sensitive_env(candidate.path.name):
-        if candidate.tracked is True:
-            add("VW-ENV-TRACKED", 1)
-        elif candidate.tracked is False:
-            add("VW-ENV-UNIGNORED", 1)
-
     firebase_rule_file = _is_firebase_rules_path(candidate.display_path)
     workflow_file = _is_workflow_path(candidate.scope_path or candidate.display_path)
     service_account_type_line: int | None = None
@@ -2808,6 +2851,11 @@ def _scan_text(
                         or normalized_rules[key_start + len(key)] != opening_quote
                     ):
                         continue
+                integer_equality = _FIREBASE_INTEGER_EQUALITY_RE.search(match.group(0))
+                if integer_equality is not None and int(integer_equality.group(1)) != int(
+                    integer_equality.group(2)
+                ):
+                    continue
                 line_number = (
                     normalized_line_numbers[match.start()]
                     if match.start() < len(normalized_line_numbers)
@@ -2865,11 +2913,26 @@ def _scan_text(
         }
     scripts = manifest.get("scripts")
     if isinstance(scripts, dict):
-        for name in ("preinstall", "install", "postinstall", "prepare"):
-            script = scripts.get(name)
-            if isinstance(script, str):
-                script_line = _line_for_json_key(lines, name)
-                add("VW-INSTALL-SCRIPT", script_line)
+        lifecycle_hooks = {
+            "preinstall",
+            "install",
+            "postinstall",
+            "prepublish",
+            "preprepare",
+            "prepare",
+            "postprepare",
+        }
+        script_names = {
+            name
+            for name, script in scripts.items()
+            if isinstance(name, str) and isinstance(script, str)
+        }
+        script_line_numbers = _line_numbers_for_json_keys(lines, script_names)
+        for name, script in scripts.items():
+            if isinstance(name, str) and isinstance(script, str):
+                script_line = script_line_numbers.get(name, 1)
+                if name in lifecycle_hooks:
+                    add("VW-INSTALL-SCRIPT", script_line)
                 remote_lines, unparsed_shell_lines = _remote_pipe_line_numbers(script)
                 if remote_lines:
                     add("VW-REMOTE-INSTALL-SCRIPT", script_line)
@@ -2982,10 +3045,22 @@ def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tup
             if unicodedata.category(character) != "Cf" and not character.isspace()
         )
 
-    if normalized_identity(metadata["owner"]) == normalized_identity(metadata["approved-by"]):
+    def normalized_required_value(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value)
+        return "".join(
+            character
+            for character in normalized
+            if unicodedata.category(character) != "Cf"
+        ).strip()
+
+    if any(not normalized_required_value(metadata[key]) for key in required):
+        return False, None
+    owner = normalized_identity(metadata["owner"])
+    approver = normalized_identity(metadata["approved-by"])
+    if not owner or not approver or owner == approver:
         return False, None
     try:
-        expiry = dt.date.fromisoformat(metadata["expires"].strip())
+        expiry = dt.date.fromisoformat(normalized_required_value(metadata["expires"]))
     except ValueError:
         return False, None
     if expiry <= today:
@@ -3131,6 +3206,32 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         return report
 
     candidates = _redact_content_values_from_paths(candidates, path_values)
+    for candidate in candidates:
+        rule_id: str | None = None
+        if _is_sensitive_env(candidate.path.name):
+            if candidate.tracked is True:
+                rule_id = "VW-ENV-TRACKED"
+            elif candidate.tracked is False:
+                rule_id = "VW-ENV-UNIGNORED"
+        if rule_id is None:
+            continue
+        if len(report.findings) >= DEFAULT_MAX_FINDINGS:
+            report.findings.clear()
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.finding-limit",
+                    "The finding limit was exceeded; no partial result was produced.",
+                )
+            )
+            return report
+        report.findings.append(
+            Finding(
+                rule_id,
+                candidate.display_path,
+                1,
+                source_id=candidate.source_id,
+            )
+        )
     manifests: list[dict[str, object]] = []
     for candidate in candidates:
         if candidate.source_id not in readable_source_ids:
@@ -3230,7 +3331,7 @@ def render_text(report: Report) -> str:
         for finding in report.findings:
             state = "[SUPPRESSED]" if finding.suppressed else ""
             lines.append(
-                f"- [{finding.rule.severity.upper()}]{state} {finding.rule_id} {finding.path}:{finding.line} — {finding.rule.message}"
+                f"- [{finding.rule.severity.upper()}]{state} {finding.rule_id} {finding.path}:{finding.line} - {finding.rule.message}"
             )
             lines.append(f"  Remediation: {finding.rule.remediation}")
             if finding.suppressed:
@@ -3243,7 +3344,7 @@ def render_text(report: Report) -> str:
     if report.tool_errors:
         lines.append("Tool errors:")
         for issue in report.tool_errors:
-            lines.append(f"- [TOOL-ERROR] {issue.code} {issue.path} — {issue.message}")
+            lines.append(f"- [TOOL-ERROR] {issue.code} {issue.path} - {issue.message}")
     skipped = ", ".join(f"{key}={value}" for key, value in sorted(report.skipped.items())) or "none"
     lines.extend(
         [
@@ -3259,7 +3360,8 @@ def render_text(report: Report) -> str:
             "Release assertion: none. Exit 0 only means no scanner blocker; it is not GO or proof of security/readiness.",
         ]
     )
-    return "\n".join(lines) + "\n"
+    rendered = "\n".join(lines) + "\n"
+    return rendered.encode("ascii", "backslashreplace").decode("ascii")
 
 
 def render_json(report: Report) -> str:

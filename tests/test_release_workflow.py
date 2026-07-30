@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 
@@ -36,7 +38,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
             r"(?m)^    permissions:\n      contents: read\n      id-token: write\n"
             r"      attestations: write$",
         )
-        self.assertNotIn("contents: write", self.workflow)
+        self.assertRegex(
+            self.workflow,
+            r"(?m)^    environment: github-release\n    permissions:\n"
+            r"      attestations: read\n      contents: write$",
+        )
+        build_block, promotion_block = self.workflow.split("\n  promote:\n", 1)
+        self.assertNotIn("contents: write", build_block)
+        self.assertEqual(1, promotion_block.count("contents: write"))
         self.assertNotIn("releases: write", self.workflow)
         self.assertNotIn("pull_request_target", self.workflow)
 
@@ -45,25 +54,35 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "actions/checkout": (
                 "3d3c42e5aac5ba805825da76410c181273ba90b1",
                 "v7.0.1",
+                1,
             ),
             "actions/attest-build-provenance": (
                 "0f67c3f4856b2e3261c31976d6725780e5e4c373",
                 "v4.1.1",
+                2,
             ),
             "actions/upload-artifact": (
                 "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
                 "v7.0.1",
+                1,
+            ),
+            "actions/download-artifact": (
+                "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+                "v8.0.1",
+                1,
             ),
         }
         uses = re.findall(r"(?m)^\s+uses: ([^@\s]+)@([^\s]+)(?:\s+#\s*(.*))?$", self.workflow)
         self.assertEqual(set(expected), {action for action, _, _ in uses})
-        self.assertEqual(len(expected), len(uses))
+        self.assertEqual(sum(item[2] for item in expected.values()), len(uses))
         for action, revision, comment in uses:
-            expected_revision, version = expected[action]
+            expected_revision, version, _ = expected[action]
             self.assertRegex(revision, r"^[0-9a-f]{40}$")
             self.assertEqual(expected_revision, revision)
             self.assertIn(version, comment)
             self.assertIn("official GitHub API 2026-07-30", comment)
+        for action, (_, _, expected_count) in expected.items():
+            self.assertEqual(expected_count, sum(found == action for found, _, _ in uses))
 
     def test_archive_is_built_twice_from_the_evaluated_skill_tree(self) -> None:
         self.assertEqual(2, self.workflow.count("git archive --format=zip -9"))
@@ -74,8 +93,68 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('${release_commit}:skill/vibeworthy', self.workflow)
         self.assertIn('if [[ "$candidate_tree" != "$release_tree" ]]', self.workflow)
         self.assertIn("VibeWorthy-Candidate-Commit:", self.workflow)
-        self.assertIn("git merge-base --is-ancestor", self.workflow)
+        self.assertIn('if [[ "$candidate_commit" != "$release_commit" ]]', self.workflow)
+        self.assertNotIn("git merge-base --is-ancestor", self.workflow)
         self.assertIn("archive inventory differs from the evaluated skill tree", self.workflow)
+
+    def test_candidate_and_release_commit_must_be_identical(self) -> None:
+        match = re.search(
+            r'(?ms)^          if \[\[ "\$candidate_commit" != "\$release_commit" \]\]; then\n'
+            r".*?^          fi$",
+            self.workflow,
+        )
+        self.assertIsNotNone(match)
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "the release workflow requires bash")
+        guard = textwrap.dedent(match.group(0))  # type: ignore[union-attr]
+
+        def run_guard(candidate: str, release: str) -> subprocess.CompletedProcess[str]:
+            script = (
+                "set -euo pipefail\n"
+                'candidate_commit="$1"\n'
+                'release_commit="$2"\n'
+                f"{guard}\n"
+            )
+            return subprocess.run(
+                [bash, "-c", script, "identity-test", candidate, release],  # type: ignore[list-item]
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        commit = "a" * 40
+        self.assertEqual(0, run_guard(commit, commit).returncode)
+        mismatch = run_guard(commit, "b" * 40)
+        self.assertNotEqual(0, mismatch.returncode)
+        self.assertIn("must exactly match", mismatch.stderr)
+
+    def test_every_inline_python_uses_isolated_mode_and_cannot_shadow_stdlib(self) -> None:
+        invocations = re.findall(r"(?m)^\s+(python3[^\n]*<<'PY')$", self.workflow)
+        self.assertEqual(3, len(invocations))
+        self.assertTrue(all(command == "python3 -I - <<'PY'" for command in invocations))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "shadow-import-executed"
+            (root / "json.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, "-I", "-"],
+                cwd=root,
+                input="import json\nprint(json.__file__)\n",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(marker.exists(), "isolated stdin Python imported a workspace json.py")
+            self.assertNotIn(str(root), result.stdout)
 
     def test_version_validation_follows_semver_2_0_0(self) -> None:
         match = re.search(
@@ -193,6 +272,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(".manifest.json", self.workflow)
         self.assertIn(".provenance.jsonl", self.workflow)
         self.assertIn("subject-path: ${{ steps.prepare.outputs.archive_path }}", self.workflow)
+        self.assertIn("subject-path: ${{ steps.describe.outputs.checksums_path }}", self.workflow)
+        self.assertEqual(2, self.workflow.count("actions/attest-build-provenance@"))
         self.assertIn('"kind": "GitHub build provenance attestation"', self.workflow)
         self.assertNotIn("signature", self.workflow.lower())
         exact_paths = (
@@ -201,16 +282,24 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "${{ steps.describe.outputs.manifest_path }}",
             "${{ steps.describe.outputs.provenance_path }}",
             "${{ steps.describe.outputs.checksums_path }}",
+            "${{ steps.stage_checksums_attestation.outputs.checksums_provenance_path }}",
         )
         upload_block = self.workflow.split("- name: Upload the exact release assets", 1)[1]
         for path in exact_paths:
             self.assertEqual(1, upload_block.count(path))
         self.assertIn("if-no-files-found: error", upload_block)
         self.assertIn("compression-level: 0", upload_block)
+        self.assertIn(
+            'checksums_provenance_name="vibeworthy-v${VERSION}.checksums.provenance.jsonl"',
+            self.workflow,
+        )
+        self.assertRegex(
+            self.workflow,
+            r"(?s)checksum_paths = sorted\(\n\s+\(archive_path, bundle_path, manifest_path, sbom_path\),",
+        )
 
-    def test_workflow_does_not_publish_or_create_a_tag(self) -> None:
+    def test_only_tag_push_promotes_and_no_step_creates_or_moves_a_tag(self) -> None:
         forbidden = (
-            "gh release",
             "git tag",
             "git push",
             "create-release",
@@ -220,6 +309,28 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for value in forbidden:
             with self.subTest(value=value):
                 self.assertNotIn(value, self.workflow.lower())
+        build_block, promotion_block = self.workflow.split("\n  promote:\n", 1)
+        self.assertNotIn("gh release create", build_block)
+        self.assertIn(
+            "if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}",
+            promotion_block,
+        )
+        self.assertIn("environment: github-release", promotion_block)
+        self.assertIn("artifact-ids: ${{ needs.release.outputs.artifact_id }}", promotion_block)
+        self.assertEqual(2, promotion_block.count("gh attestation verify"))
+        self.assertIn("--verify-tag", promotion_block)
+        self.assertIn('gh release create "${release_args[@]}"', promotion_block)
+        publish_block = promotion_block.split("- name: Publish the durable GitHub Release", 1)[1]
+        for name in (
+            "vibeworthy-v${VERSION}.zip",
+            "vibeworthy-v${VERSION}.sbom.cdx.json",
+            "vibeworthy-v${VERSION}.manifest.json",
+            "vibeworthy-v${VERSION}.provenance.jsonl",
+            "SHA256SUMS",
+            "vibeworthy-v${VERSION}.checksums.provenance.jsonl",
+        ):
+            self.assertEqual(1, publish_block.count(f"$ASSET_DIR/{name}"))
+        self.assertIn("Source code archives are repository snapshots", publish_block)
 
     def test_forward_protocol_records_exact_model_and_thread_id(self) -> None:
         documentation = FORWARD_README.read_text(encoding="utf-8")
@@ -241,18 +352,33 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "Skill archive (A)",
             "Skill archive SHA-256 (D)",
             "Companion SBOM",
-            "Build provenance attestation",
+            "Release manifest",
+            "Archive build provenance",
+            "Checksum index",
+            "Checksum-index provenance",
+            "Published asset inventory",
+            "Durable GitHub Release",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, evidence)
-        self.assertIn("C is an ancestor of R", evidence)
-        self.assertIn("C:skill/vibeworthy", evidence)
+        self.assertIn("require R to equal C exactly", normalized_evidence)
         self.assertIn("R:skill/vibeworthy", evidence)
         self.assertIn("VibeWorthy-Candidate-Commit: <C>", evidence)
+        self.assertIn("candidate that differs from the tag target", normalized_evidence)
         self.assertIn(
             "A GitHub build provenance attestation is provenance evidence",
             normalized_evidence,
         )
+        self.assertIn(
+            "| Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |",
+            evidence,
+        )
+        self.assertIn("workflow_dispatch` run is only a build/attestation rehearsal", evidence)
+        self.assertIn("exactly the ZIP, SBOM, release", normalized_evidence)
+        self.assertIn("exact six workflow-managed files", normalized_evidence)
+        self.assertIn("checking only a bundle digest is insufficient", normalized_evidence)
+        self.assertIn("automatic source archives are host-created snapshots outside", normalized_evidence)
+        self.assertIn("unknown` is an unresolved ownership blocker", evidence)
 
 
 if __name__ == "__main__":

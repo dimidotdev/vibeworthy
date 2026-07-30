@@ -7,11 +7,16 @@ Copy this file for one release candidate. Record facts for the named artifact an
 - Evaluated candidate commit (C): `[full 40-character commit SHA]`
 - Evaluated `skill/vibeworthy` tree (T): `[full Git tree SHA from C]`
 - Release/tag commit (R): `[full 40-character commit SHA]`
-- Tag/ref: `[annotated tag or workflow-dispatch ref; tags remain movable labels]`
+- Tag/ref: `[annotated SemVer tag for a public release; tags remain movable labels]`
 - Skill archive (A): `[exact filename; archive root must be vibeworthy/]`
 - Skill archive SHA-256 (D): `[64 lowercase hexadecimal characters]`
 - Companion SBOM: `[exact filename and SHA-256]`
-- Build provenance attestation: `[GitHub attestation ID/URL and bundle filename/SHA-256]`
+- Release manifest: `[exact filename and SHA-256]`
+- Archive build provenance: `[GitHub attestation ID/URL and bundle filename/SHA-256]`
+- Checksum index: `[SHA256SUMS filename and SHA-256]`
+- Checksum-index provenance: `[GitHub attestation ID/URL and bundle filename/SHA-256]`
+- Published asset inventory: `[the exact four checksum-listed assets plus SHA256SUMS and its provenance bundle]`
+- Durable GitHub Release: `[release URL/ID]`
 - Included scope: `[features and data flows]`
 - Excluded scope: `[explicit exclusions]`
 - Environment and destination: `[staging/production; named project]`
@@ -21,17 +26,20 @@ Copy this file for one release candidate. Record facts for the named artifact an
 - Independent reviewer: `[name/role]`
 - Effective safety mode: `ship`
 
-Record C and T before evaluation. At release time, verify that C is an ancestor of R and that
-`git rev-parse C:skill/vibeworthy` equals `git rev-parse R:skill/vibeworthy`; C and R may be the same
-commit. A and D identify the distributed bytes. Do not manufacture a future commit SHA inside a file
-that the future commit must contain: record tag, workflow-run, attestation, and final asset facts in
-the generated release manifest or another post-build evidence record. A GitHub build provenance
+Record C and T before evaluation. At release time, require R to equal C exactly and verify that
+`git rev-parse R:skill/vibeworthy` equals T. The annotated release tag must point directly to the
+evaluated candidate; a descendant commit with an identical skill tree is not an acceptable release
+substitute. A and D identify the distributed bytes. Do not manufacture a future commit SHA inside a
+file that the future commit must contain: record tag, workflow-run, attestation, and final asset facts
+in the generated release manifest or another post-build evidence record. A GitHub build provenance
 attestation is provenance evidence; record signature verification only when it was actually
 performed and retained.
 
-For a tag-triggered build, use an annotated SemVer tag and include exactly one trailer line:
+For a public release, use an annotated SemVer tag and include exactly one trailer line:
 `VibeWorthy-Candidate-Commit: <C>`. The workflow rejects lightweight tags, missing/duplicate
-trailers, non-ancestor candidates, and any R whose skill tree differs from T.
+trailers, any candidate that differs from the tag target, and any R whose skill tree differs from T.
+A `workflow_dispatch` run is only a build/attestation rehearsal and cannot support a public-release
+`GO`; it must not publish or substitute for the annotated tag and durable GitHub Release.
 
 ## Blockers first
 
@@ -43,11 +51,14 @@ Do not delete this section because other checks pass. Write `None observed in re
 
 ## Verification ledger
 
-| Gate | Artifact, scope, environment, and tool/version | Kind | Result | Evidence | Residual risk | Owner / next action |
+| Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |
 | --- | --- | --- | --- | --- | --- | --- |
-| `[gate]` | `[exact target]` | automated / manual | pass / fail / tool error / unresolved / N/A | `[command, reviewer, safe link]` | `[limitation]` | `[owner/action]` |
+| `[automated pass / failure / tool error / manual check / residual risk / exception]` | `[one gate or fact]` | `[pass / fail / tool error / unresolved / accepted]` | `[exact target, environment, tool/version, command, reviewer, or safe link]` | `[specific limitation or none observed in scope]` | `[named person/role or unknown]` | `[specific action or none]` |
 
 Keep automated passes, failures, tool errors, and manual checks distinct. Never turn “not run,” scanner suppression, or a tool error into a pass.
+Give every distinct failure, tool error, required manual check, and residual risk its own row. Every
+non-pass row requires an owner and concrete next action; bullets or prose do not replace this ledger.
+`unknown` is an unresolved ownership blocker, not an assigned owner, and cannot satisfy a `GO` gate.
 
 ## Market and product fit for this release
 
@@ -164,6 +175,14 @@ Do not invent a lawful basis, consent conclusion, or jurisdictional answer. Retu
 | Third-party automation pinned by digest/full SHA | `[record]` | pass/fail/unresolved | `[owner/action]` |
 | Provenance/signature verification | `[record]` | pass/fail/tool error | `[owner/action]` |
 | Source, lockfile, artifact, and deployed digest match | `[digests]` | pass/fail/unresolved | `[owner/action]` |
+
+For the VibeWorthy repository release, `SHA256SUMS` must contain exactly the ZIP, SBOM, release
+manifest, and archive-provenance bundle. Its separately verified GitHub attestation authenticates that
+finite index. The checksum index and its own attestation bundle are verification assets and are not
+recursively listed in `SHA256SUMS`. Verify the ZIP's archive-provenance statement and the checksum-
+index attestation separately against the expected repository, workflow signer, source commit, and tag
+ref; checking only a bundle digest is insufficient. Verify the exact six workflow-managed files before
+promotion. GitHub's automatic source archives are host-created snapshots outside this inventory.
 
 Return `NO-GO` for every mandatory supply-chain failure named by the release policy.
 

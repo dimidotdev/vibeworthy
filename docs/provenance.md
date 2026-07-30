@@ -63,7 +63,15 @@ mutable convenience label, even when a hosting platform presents it as a version
 only import a branch or tag, review the resolved files, record the full SHA, and repeat the review if
 the label resolves differently.
 
-At this ledger's 2026-07-30 review, the local repository had no commits and no configured remote. The
-planned GitHub URL in the README is therefore not publication evidence. The first public release must
-record its commit SHA, CI run, tag-to-SHA check, and package digest or equivalent archive verification
-without rewriting this historical observation.
+At this ledger's initial 2026-07-30 review, the local repository had no commits and no configured
+remote. This historical observation is retained; the repository was subsequently initialized and
+staged privately at `https://github.com/dimidotdev/vibeworthy` while release gates were still open.
+A URL, branch, or tag alone is not publication evidence.
+
+Every public release must bind the exact independently evaluated commit to its annotated tag and CI
+run. `SHA256SUMS` binds the ZIP, SBOM, release manifest, and archive-provenance bundle; a separate
+GitHub attestation authenticates that checksum index. Those four indexed assets plus the index and its
+attestation form the exact six-file workflow-managed release inventory; GitHub's automatic source
+archives are host-created snapshots outside that inventory. Post-release evidence may record resulting
+digests, attestations, and durable GitHub Release identifiers in a later documentation commit without
+changing the evaluated tag target.

@@ -34,9 +34,19 @@ An Agent Skill can influence tool use and may include executable files. Read eve
 your environment, and record the exact 40-character commit SHA you reviewed. Branches and tags are
 mutable labels; the commit SHA (or a verified package digest) is the version identity.
 
-The planned canonical repository is `https://github.com/dimidotdev/vibeworthy`. At the provenance
-review date this local project had not yet been published, so treat that address as an installation
-source only after it resolves and the reviewed commit exists there.
+The canonical repository is `https://github.com/dimidotdev/vibeworthy`. Treat it as an installation
+source only while it resolves publicly and the exact commit or verified release package you reviewed
+is still available there.
+
+The release workflow is configured to publish the Agent Skill ZIP, CycloneDX SBOM, release manifest,
+`SHA256SUMS`, and two GitHub provenance bundles for a verified annotated tag. Verify `SHA256SUMS`
+with its checksum-index attestation, verify the ZIP separately with its archive-provenance bundle, and
+constrain both `gh attestation verify` checks to the expected repository, release workflow signer,
+source commit, and tag ref. Then verify every digest listed in `SHA256SUMS` before installing the ZIP.
+The automatically generated GitHub “Source code” archives are host-created repository snapshots; they
+are outside the workflow-managed six-file inventory and are not the attested Agent Skill package.
+Until a release run and these durable assets exist, treat this as the intended release contract rather
+than evidence that publication already succeeded.
 
 ## Compatibility snapshot
 

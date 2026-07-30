@@ -161,7 +161,27 @@ Issue `GO`, `CONDITIONAL`, or `NO-GO` only when the effective mode is `ship` or 
 release decision. For `explore` and private `prototype` work, say whether to proceed with the bounded
 experiment without calling that experiment `GO`; release status has not been evaluated.
 
-Copy [the release evidence template](assets/release-evidence.md). Name the artifact or commit, scope, environment, date, and policy. Put blockers before successful checks and assign every failure or residual risk an owner and next action.
+Copy [the release evidence template](assets/release-evidence.md). Put blockers before successful checks.
+
+### Mandatory release ledger — never omit or replace
+
+Before every release recommendation, including an obvious `NO-GO`, print one compact identity line with
+`Artifact`, `Scope`, `Environment`, `Policy`, and `Evidence cutoff`. Use `unknown` or `unresolved`
+rather than omitting a value.
+
+Then print this Markdown ledger with these exact columns:
+
+| Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |
+| --- | --- | --- | --- | --- | --- | --- |
+| `[automated pass / failure / tool error / manual check / residual risk / exception]` | `[one gate or fact]` | `[pass / fail / tool error / unresolved / accepted]` | `[observed artifact or missing evidence]` | `[specific remaining risk or none observed in scope]` | `[named person/role or unknown]` | `[specific next action or none]` |
+
+Replace the example row; never leave placeholders. Bullets, prose, a blocker list, or the full template
+do not replace this ledger, even when the user asks for brevity. Give every distinct failure, tool
+error, required manual check (passed or unresolved), and residual risk its own row. Do not merge items
+that have different evidence, owners, or actions. Every non-pass row requires an owner and concrete
+next action; use `unknown — assign owner` when no owner is known, but treat that value as an unresolved
+ownership blocker that cannot support `GO`. Keep cells short and link to detailed evidence instead of
+copying it into the response.
 
 Return exactly one recommendation:
 
@@ -185,7 +205,8 @@ Do not omit a required field; use `unknown`, `unresolved`, or `not applicable �
    accepted tradeoff and revisit trigger.
 4. `Slices` — completed behavior and per-slice verification.
 5. `Trust` — boundaries, OWASP/ASVS mappings, privacy/secrets/backend/supply-chain status, and blockers.
-6. `Release` — evidence table, residual risks, owner/action, and `GO`, `CONDITIONAL`, or `NO-GO` when a release decision was requested.
+6. `Release` — mandatory release identity, the exact seven-column ledger from section 7, and `GO`,
+   `CONDITIONAL`, or `NO-GO` when a release decision was requested; bullets never replace the ledger.
 7. `Actions` — state exactly which external or consequential actions were performed. If none, write
    `External actions performed: none`.
 

@@ -35,7 +35,7 @@
       },
       {
         "name": "vibeworthy:generator",
-        "value": "manually reviewed CycloneDX 1.6 manifest; while the project is unpublished, the release archive digest and source commit remain to be recorded in the release evidence before publication"
+      "value": "manually reviewed source CycloneDX 1.6 manifest; the release workflow is configured to bind the evaluated commit, skill archive digest, generated SBOM, manifest, checksums, and GitHub provenance"
       }
     ]
   },

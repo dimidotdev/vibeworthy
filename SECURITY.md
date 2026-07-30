@@ -9,8 +9,8 @@ full commit SHA or verified package digest, not only by a branch or tag name.
 
 ## Report privately
 
-After the canonical GitHub repository is published, use its private **Security > Advisories > New
-draft advisory** flow. Do not open a public issue for a suspected credential exposure, scanner
+Use **Security > Report a vulnerability** in the canonical GitHub repository when private
+vulnerability reporting is available. Do not open a public issue for a suspected credential exposure, scanner
 redaction failure, path-boundary escape, unintended code execution, or other vulnerability. If the
 private advisory channel is unavailable, open a public issue containing only a request for a private
 contact channel and no vulnerability details.
