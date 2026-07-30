@@ -404,6 +404,7 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn("python-version: ${{ matrix.python-version }}", workflow)
         self.assertIn("python -m unittest discover", workflow)
         self.assertRegex(workflow, r"(?m)^\s+contents:\s+read\s*$")
+        self.assertIn("persist-credentials: false", workflow)
 
         expected_actions = {
             "actions/checkout": (

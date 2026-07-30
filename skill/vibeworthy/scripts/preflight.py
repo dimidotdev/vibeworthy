@@ -13,6 +13,7 @@ import argparse
 import base64
 import dataclasses
 import datetime as dt
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -39,8 +40,9 @@ DEFAULT_MAX_FILE_BYTES = 1_048_576
 DEFAULT_MAX_FILES = 20_000
 DEFAULT_MAX_TOTAL_BYTES = 67_108_864
 DEFAULT_MAX_FINDINGS = 50_000
-MAX_PATH_REDACTION_VALUES = 50_000
-MAX_PATH_REDACTION_PATTERN_CHARS = 4_194_304
+MAX_PATH_REDACTION_VALUES = 2_048
+MAX_PATH_REDACTION_PATTERN_CHARS = 131_072
+MAX_SHELL_CLASSIFICATION_TOKENS = 32_768
 MAX_SUPPRESSION_METADATA_CHARS = 4_096
 
 BLOCKER = "blocker"
@@ -532,12 +534,32 @@ _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY\b",
     re.IGNORECASE,
 )
+_FIREBASE_LITERAL = (
+    r"(?:null|[+-]?[0-9]{1,32}(?:\.[0-9]{1,32})?|"
+    r'"(?:\\.|[^"\\\r\n]){0,256}"|'
+    r"'(?:\\.|[^'\\\r\n]){0,256}')"
+)
 _FIREBASE_TRUE_EXPRESSION = (
-    r"(?:true(?: *== *true)?|false *== *false|[+-]?[0-9]{1,32} *== *[+-]?[0-9]{1,32}|"
+    r"(?:true(?: *== *true)?|false *== *false|"
+    + _FIREBASE_LITERAL
+    + r" *== *"
+    + _FIREBASE_LITERAL
+    + r"|"
     r"(?:! *! *){1,16}true|! *(?:! *! *){0,15}false)"
 )
-_FIREBASE_INTEGER_EQUALITY_RE = re.compile(
-    r"(?<![A-Za-z0-9_.])([+-]?[0-9]{1,32}) *== *([+-]?[0-9]{1,32})(?![A-Za-z0-9_.])"
+_FIREBASE_LITERAL_EQUALITY_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])(?P<left>"
+    + _FIREBASE_LITERAL
+    + r") *== *(?P<right>"
+    + _FIREBASE_LITERAL
+    + r")(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
+)
+_FIREBASE_TRUE_OPERAND_RE = re.compile(
+    r"(?<![A-Za-z0-9_.!])(?P<expression>"
+    + _FIREBASE_TRUE_EXPRESSION
+    + r")(?![A-Za-z0-9_.])",
+    re.IGNORECASE,
 )
 _FIREBASE_OPEN_PARENS = r"(?:\( *)*"
 _FIREBASE_CLOSE_PARENS = r"(?: *\))*"
@@ -576,6 +598,43 @@ _SUPPRESSION_RE = re.compile(
     r"vibeworthy\s*:\s*(?:ignore|suppress)\s+(?:\[)?(?P<rule>[A-Za-z0-9._-]+)(?:\])?(?P<meta>.*)$",
     re.IGNORECASE,
 )
+_REMOTE_FETCHER_RE = re.compile(r"\b(?:curl|wget)(?:\.exe)?\b", re.IGNORECASE)
+_REMOTE_FETCHER_OBFUSCATED_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"c[\\\"'$]*u[\\\"'$]*r[\\\"'$]*l|"
+    r"w[\\\"'$]*g[\\\"'$]*e[\\\"'$]*t"
+    r")(?:\.exe)?(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+_SHELL_ENCODED_PIPE_RE = re.compile(
+    r"\\(?:x7c|174|u007c|U0000007c)",
+    re.IGNORECASE,
+)
+_SHELL_REDIRECTION_RE = re.compile(
+    r"(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?"
+    r"(?:<<<|<<-?|<>|>>|>\||>|<|&>>|&>|<&|>&)"
+    r"(?:[0-9]+|-)?"
+)
+_COMMAND_INTERPRETERS = frozenset(
+    {
+        ".", "source", "ash", "bash", "cmd", "csh", "dash", "ksh", "mksh", "sh",
+        "zsh", "python", "python2", "python3", "node", "perl", "ruby", "php",
+        "powershell", "pwsh",
+    }
+)
+_JSON_LINE_BREAKS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+_SHELL_LITERAL_OPERATOR_CODES = {
+    "|": "\0p", ";": "\0s", "&": "\0a", "<": "\0l", ">": "\0g"
+}
+_SHELL_LITERAL_OPERATOR_VALUES = {
+    encoded: operator for operator, encoded in _SHELL_LITERAL_OPERATOR_CODES.items()
+}
+
+
+def _decode_shell_literal_operators(value: str) -> str:
+    for encoded, operator in _SHELL_LITERAL_OPERATOR_VALUES.items():
+        value = value.replace(encoded, operator)
+    return value
 
 
 def _contains_path(parent: Path, child: Path) -> bool:
@@ -584,6 +643,18 @@ def _contains_path(parent: Path, child: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _path_originates_within(root: Path, path: Path) -> bool:
+    """Compare lexical ancestors by object identity without losing redirect origin."""
+
+    for candidate in (path, *path.parents):
+        try:
+            if candidate.samefile(root):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 def _path_identity(value: os.stat_result) -> tuple[int, int, int]:
@@ -1000,6 +1071,7 @@ def _secret_assignment_separator(value: str) -> int | None:
 
 
 def _safe_display_component(value: str) -> str:
+    value = unicodedata.normalize("NFC", value)
     output: list[str] = []
     for character in value:
         code = ord(character)
@@ -1128,10 +1200,15 @@ def _redact_content_values_from_paths(
             continue
         merged: list[tuple[int, int]] = []
         for start, end in intervals:
-            if merged and start <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-            else:
-                merged.append((start, end))
+            # Matches arrive in non-decreasing end order, not start order. A
+            # longer match can therefore begin before several earlier spans.
+            # Collapse every overlap while retaining the leftmost boundary;
+            # each span is pushed and popped at most once.
+            while merged and start <= merged[-1][1]:
+                previous_start, previous_end = merged.pop()
+                start = min(start, previous_start)
+                end = max(end, previous_end)
+            merged.append((start, end))
         parts: list[str] = []
         cursor = 0
         for start, end in merged:
@@ -1178,6 +1255,25 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
+def _controlled_source_root(cwd: Path) -> Path:
+    """Find the outermost visible repository boundary without invoking Git."""
+
+    current = cwd if cwd.is_dir() else cwd.parent
+    controlled_root = current
+    for candidate in (current, *current.parents):
+        try:
+            os.lstat(candidate / ".git")
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            # An unreadable marker is still a controlled boundary. Keep
+            # walking so a nested marker cannot narrow an outer worktree.
+            controlled_root = candidate
+            continue
+        controlled_root = candidate
+    return controlled_root
+
+
 def _resolve_git_executable(cwd: Path) -> str:
     """Resolve Git without trusting relative or worktree-controlled PATH entries."""
 
@@ -1185,12 +1281,19 @@ def _resolve_git_executable(cwd: Path) -> str:
         resolved_cwd = cwd.resolve(strict=True)
     except OSError as exc:
         raise GitUnavailable from exc
+    controlled_root = _controlled_source_root(resolved_cwd)
     path_value = os.environ.get("PATH", "")
     for entry in path_value.split(os.pathsep):
         if not entry:
             continue
         entry_path = Path(entry)
         if not entry_path.is_absolute():
+            continue
+        try:
+            lexical_entry = Path(os.path.abspath(os.fspath(entry_path)))
+        except (OSError, ValueError):
+            continue
+        if _path_originates_within(controlled_root, lexical_entry):
             continue
         candidate = shutil.which("git", path=os.fspath(entry_path))
         if candidate is None:
@@ -1206,11 +1309,11 @@ def _resolve_git_executable(cwd: Path) -> str:
             continue
         if not stat.S_ISREG(candidate_stat.st_mode):
             continue
-        if _contains_path(resolved_cwd, lexical_candidate):
+        if _path_originates_within(controlled_root, lexical_candidate):
             continue
         candidate_parent = resolved_candidate.parent
-        if _contains_path(resolved_cwd, resolved_candidate) or _contains_path(
-            candidate_parent, resolved_cwd
+        if _contains_path(controlled_root, resolved_candidate) or _contains_path(
+            candidate_parent, controlled_root
         ):
             continue
         return os.fspath(resolved_candidate)
@@ -1801,23 +1904,102 @@ def _is_known_specialized_value(value: str) -> bool:
     return False
 
 
-def _line_numbers_for_json_keys(lines: Sequence[str], keys: set[str]) -> dict[str, int]:
-    """Locate decoded JSON object keys in one bounded pass for diagnostic lines."""
+def _json_location_tokens(text: str) -> Iterable[tuple[str, str, int]]:
+    """Yield decoded strings, structural punctuation, and atoms with line numbers."""
 
-    remaining = set(keys)
-    result: dict[str, int] = {}
-    key_pattern = re.compile(r'"(?P<key>(?:\\.|[^"\\])*)"\s*:')
-    for line_number, line in enumerate(lines, start=1):
-        if not remaining:
-            break
-        for match in key_pattern.finditer(line):
+    index = 0
+    line_number = 1
+    punctuation = set("{}[]:,")
+    while index < len(text):
+        character = text[index]
+        if character.isspace():
+            if character in _JSON_LINE_BREAKS:
+                line_number += 1
+                if character == "\r" and index + 1 < len(text) and text[index + 1] == "\n":
+                    index += 1
+            index += 1
+            continue
+        if character == '"':
+            start = index
+            start_line = line_number
+            index += 1
+            escaped = False
+            while index < len(text):
+                current = text[index]
+                if current in _JSON_LINE_BREAKS:
+                    line_number += 1
+                    if current == "\r" and index + 1 < len(text) and text[index + 1] == "\n":
+                        index += 1
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    index += 1
+                    break
+                index += 1
             try:
-                key = json.loads(f'"{match.group("key")}"')
+                decoded = json.loads(text[start:index])
             except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(key, str) and key in remaining:
-                result[key] = line_number
-                remaining.remove(key)
+                decoded = ""
+            yield "string", decoded if isinstance(decoded, str) else "", start_line
+            continue
+        if character in punctuation:
+            yield character, character, line_number
+            index += 1
+            continue
+        start = index
+        while index < len(text) and not text[index].isspace() and text[index] not in punctuation:
+            index += 1
+        yield "atom", text[start:index], line_number
+
+
+def _line_numbers_for_json_object_keys(
+    text: str,
+    object_key: str,
+    keys: set[str],
+) -> dict[str, int]:
+    """Locate effective keys in the effective top-level JSON object value."""
+
+    containers: list[str] = []
+    previous: tuple[str, str, int] | None = None
+    waiting_for_object_value = False
+    active_depth: int | None = None
+    result: dict[str, int] = {}
+    for kind, value, line_number in _json_location_tokens(text):
+        if kind == ":":
+            if previous is not None and previous[0] == "string":
+                key, key_line = previous[1], previous[2]
+                if containers == ["object"] and key == object_key:
+                    waiting_for_object_value = True
+                if (
+                    active_depth is not None
+                    and len(containers) == active_depth
+                    and containers[-1:] == ["object"]
+                    and key in keys
+                ):
+                    result[key] = key_line
+            previous = (kind, value, line_number)
+            continue
+
+        activates_object = waiting_for_object_value and kind == "{"
+        if waiting_for_object_value:
+            result = {}
+            active_depth = None
+            waiting_for_object_value = False
+
+        if kind == "{":
+            containers.append("object")
+            if activates_object:
+                active_depth = len(containers)
+        elif kind == "[":
+            containers.append("array")
+        elif kind in {"}", "]"}:
+            if active_depth is not None and len(containers) == active_depth:
+                active_depth = None
+            if containers:
+                containers.pop()
+        previous = (kind, value, line_number)
     return result
 
 
@@ -1894,7 +2076,10 @@ def _contextual_shell_commands(command: str) -> list[str]:
         if payload in {"|", "|-", "|+", ">", ">-", ">+"}:
             return []
         if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in {'"', "'"}:
+            quote_character = payload[0]
             payload = payload[1:-1]
+            if quote_character == '"':
+                payload = _decode_yaml_double_quoted_scalar(payload)
         return [payload]
     docker_match = re.match(r"^RUN\s+(.*)$", stripped, re.IGNORECASE | re.DOTALL)
     if docker_match:
@@ -1912,6 +2097,45 @@ def _contextual_shell_commands(command: str) -> list[str]:
     return [stripped]
 
 
+def _decode_yaml_double_quoted_scalar(value: str) -> str:
+    """Decode bounded YAML double-quoted escapes that can alter shell syntax."""
+
+    escapes = {
+        "0": "\0", "a": "\a", "b": "\b", "t": "\t", "n": "\n",
+        "v": "\v", "f": "\f", "r": "\r", "e": "\x1b", " ": " ",
+        '"': '"', "/": "/", "\\": "\\", "N": "\x85", "_": "\xa0",
+        "L": "\u2028", "P": "\u2029",
+    }
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character != "\\" or index + 1 >= len(value):
+            output.append(character)
+            index += 1
+            continue
+        escape = value[index + 1]
+        widths = {"x": 2, "u": 4, "U": 8}
+        if escape in widths:
+            width = widths[escape]
+            digits = value[index + 2 : index + 2 + width]
+            if len(digits) == width and re.fullmatch(r"[0-9A-Fa-f]+", digits):
+                try:
+                    output.append(chr(int(digits, 16)))
+                except ValueError:
+                    output.extend(("\\", escape, digits))
+                index += 2 + width
+                continue
+        replacement = escapes.get(escape)
+        if replacement is not None:
+            output.append(replacement)
+            index += 2
+            continue
+        output.extend(("\\", escape))
+        index += 2
+    return "".join(output)
+
+
 def _heredoc_spec(command: str) -> tuple[str, bool, bool] | None:
     contexts = _contextual_shell_commands(command)
     if not contexts:
@@ -1920,21 +2144,39 @@ def _heredoc_spec(command: str) -> tuple[str, bool, bool] | None:
     if not complete:
         return None
     for index, token in enumerate(tokens[:-1]):
-        if token not in {"<<", "<<-"}:
+        is_heredoc = token.endswith("<<-") or (
+            token.endswith("<<") and not token.endswith("<<<")
+        )
+        if _SHELL_REDIRECTION_RE.fullmatch(token) is None or not is_heredoc:
             continue
         delimiter = tokens[index + 1]
         if not delimiter:
             return None
-        invocation = _command_invocation(tokens[:index])
-        executes = invocation.executable in {
-            "bash", "csh", "dash", "ksh", "sh", "zsh", "python", "python2",
-            "python3", "node", "perl", "ruby", "php", "powershell", "pwsh",
-        }
-        return delimiter, token == "<<-", executes
+        preceding_commands = _simple_shell_commands(tokens[:index])
+        invocation = _command_invocation(preceding_commands[-1] if preceding_commands else ())
+        interpreters = _COMMAND_INTERPRETERS
+        downstream_names = [
+            _shell_command_name(command)
+            for command in _simple_shell_commands(tokens[index + 2 :])
+        ]
+        descriptor = token[: -3 if token.endswith("<<-") else -2]
+        feeds_standard_input = descriptor in {"", "0"}
+        docker_run_heredoc = re.match(r"^\s*RUN\b", command, re.IGNORECASE) is not None
+        executes = docker_run_heredoc or (
+            feeds_standard_input and invocation.executable in interpreters
+        ) or (
+            feeds_standard_input
+            and invocation.executable == "cat"
+            and any(name in interpreters for name in downstream_names)
+        )
+        return delimiter, token.endswith("<<-"), executes
     return None
 
 
-def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
+def _logical_shell_commands(
+    text: str,
+    shell_payload: bool = False,
+) -> Iterable[tuple[int, str, bool]]:
     """Yield executable logical lines, excluding data-only heredoc bodies."""
 
     parts: list[str] = []
@@ -1947,8 +2189,11 @@ def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
             comparison = raw_line.lstrip("\t") if strip_tabs else raw_line
             if comparison == delimiter:
                 if executes and heredoc_body:
-                    for nested_line, nested_command in _logical_shell_commands("\n".join(heredoc_body)):
-                        yield body_start + nested_line - 1, nested_command
+                    for nested_line, nested_command, _nested_payload in _logical_shell_commands(
+                        "\n".join(heredoc_body),
+                        True,
+                    ):
+                        yield body_start + nested_line - 1, nested_command, True
                 heredoc = None
                 heredoc_body = []
             else:
@@ -1961,12 +2206,16 @@ def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
         backslash_continuation = trailing_backslashes % 2 == 1
         if backslash_continuation:
             trimmed = trimmed[:-1].rstrip()
+        trailing_carets = len(trimmed) - len(trimmed.rstrip("^"))
+        caret_continuation = trailing_carets % 2 == 1
+        if caret_continuation:
+            trimmed = trimmed[:-1].rstrip()
         parts.append(trimmed)
         pipeline_continuation = trimmed.endswith(("|", "|&", "||"))
-        if backslash_continuation or pipeline_continuation:
+        if backslash_continuation or caret_continuation or pipeline_continuation:
             continue
         logical = " ".join(parts)
-        yield start_line, logical
+        yield start_line, logical, shell_payload
         specification = _heredoc_spec(logical)
         if specification is not None:
             delimiter, strip_tabs, executes = specification
@@ -1975,10 +2224,76 @@ def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
     if heredoc is not None:
         _delimiter, _strip_tabs, executes, body_start = heredoc
         if executes and heredoc_body:
-            for nested_line, nested_command in _logical_shell_commands("\n".join(heredoc_body)):
-                yield body_start + nested_line - 1, nested_command
+            for nested_line, nested_command, _nested_payload in _logical_shell_commands(
+                "\n".join(heredoc_body),
+                True,
+            ):
+                yield body_start + nested_line - 1, nested_command, True
     elif parts:
-        yield start_line, " ".join(parts)
+        yield start_line, " ".join(parts), shell_payload
+
+
+def _yaml_folded_shell_commands(text: str) -> Iterable[tuple[int, str, bool]]:
+    """Yield common folded YAML command scalars as their executed shell text."""
+
+    lines = text.splitlines()
+    header = re.compile(r"^(?P<indent> *)(?:run|script|command)\s*:\s*>[-+]?\s*(?:#.*)?$", re.IGNORECASE)
+    index = 0
+    while index < len(lines):
+        match = header.match(lines[index])
+        if match is None:
+            index += 1
+            continue
+        base_indent = len(match.group("indent"))
+        cursor = index + 1
+        body: list[tuple[int, str, int] | None] = []
+        while cursor < len(lines):
+            raw_line = lines[cursor]
+            if not raw_line.strip():
+                body.append(None)
+                cursor += 1
+                continue
+            indentation = len(raw_line) - len(raw_line.lstrip(" "))
+            if indentation <= base_indent:
+                break
+            body.append((cursor + 1, raw_line, indentation))
+            cursor += 1
+        first_content = next((item for item in body if item is not None), None)
+        if first_content is not None:
+            content_indent = first_content[2]
+            executed_lines: list[str] = []
+            source_lines: list[int] = []
+            folded_parts: list[str] = []
+            folded_start = first_content[0]
+
+            def flush_folded() -> None:
+                nonlocal folded_parts
+                if folded_parts:
+                    executed_lines.append(" ".join(folded_parts))
+                    source_lines.append(folded_start)
+                    folded_parts = []
+
+            for item in body:
+                if item is None:
+                    flush_folded()
+                    continue
+                source_line, raw_line, indentation = item
+                if indentation > content_indent:
+                    flush_folded()
+                    executed_lines.append(raw_line[content_indent:].rstrip())
+                    source_lines.append(source_line)
+                    continue
+                if not folded_parts:
+                    folded_start = source_line
+                folded_parts.append(raw_line[content_indent:].strip())
+            flush_folded()
+            for local_line, command, _shell_payload in _logical_shell_commands(
+                "\n".join(executed_lines),
+                True,
+            ):
+                source_index = min(max(local_line - 1, 0), len(source_lines) - 1)
+                yield source_lines[source_index], command, True
+        index = max(index + 1, cursor)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1989,17 +2304,51 @@ class _CommandInvocation:
     complete: bool = True
 
 
+def _without_shell_redirections(tokens: Sequence[str]) -> tuple[tuple[str, ...], bool]:
+    """Remove syntactic redirections and their non-command targets."""
+
+    result: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if _SHELL_REDIRECTION_RE.fullmatch(token) is None:
+            result.append(token)
+            index += 1
+            continue
+        inline_descriptor_target = re.search(r"(?:<|>)&(?:[0-9]+|-)$", token) is not None
+        index += 1
+        if inline_descriptor_target:
+            continue
+        if index >= len(tokens) or (
+            tokens[index] and all(character in "|;&" for character in tokens[index])
+        ):
+            return tuple(result), False
+        index += 1
+    return tuple(result), True
+
+
 def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvocation:
-    current_tokens = tuple(tokens)
     if depth > 4:
+        return _CommandInvocation(tuple(tokens), None, None, False)
+    current_tokens, redirections_complete = _without_shell_redirections(tokens)
+    if not redirections_complete:
         return _CommandInvocation(current_tokens, None, None, False)
 
     index = 0
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
-    while index < len(current_tokens) and current_tokens[index] in {"(", "{", "!"}:
-        index += 1
-    while index < len(current_tokens) and assignment.fullmatch(current_tokens[index]):
-        index += 1
+    control_prefixes = {
+        "(",
+        "{",
+        "!",
+        "coproc",
+        "do",
+        "elif",
+        "else",
+        "if",
+        "then",
+        "until",
+        "while",
+    }
     sudo_options_with_value = {
         "-C",
         "--chdir",
@@ -2037,20 +2386,111 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
     }
 
     while index < len(current_tokens):
+        while index < len(current_tokens):
+            token = current_tokens[index]
+            if token in control_prefixes or token.endswith(")"):
+                index += 1
+                continue
+            if assignment.fullmatch(token):
+                index += 1
+                continue
+            break
+        if index >= len(current_tokens):
+            return _CommandInvocation(current_tokens, None, None)
+
+        if current_tokens[index] == "case":
+            saw_in = False
+            branch_index: int | None = None
+            for cursor in range(index + 1, len(current_tokens)):
+                if current_tokens[cursor] == "in":
+                    saw_in = True
+                    continue
+                if saw_in and current_tokens[cursor].endswith(")"):
+                    branch_index = cursor + 1
+                    break
+            if branch_index is None:
+                return _CommandInvocation(current_tokens, None, None, False)
+            index = branch_index
+            continue
+
+        function_index = index
+        function_token = current_tokens[function_index]
+        body_index: int | None = None
+        if function_token == "function":
+            name_index = function_index + 1
+            if name_index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            name_token = current_tokens[name_index]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)\{?", name_token):
+                body_index = name_index + 1
+                if name_token.endswith("{"):
+                    index = body_index
+                    continue
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_token):
+                body_index = name_index + 1
+                if body_index < len(current_tokens) and current_tokens[body_index] == "()":
+                    body_index += 1
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\(\)\{?", function_token):
+            body_index = function_index + 1
+            if function_token.endswith("{"):
+                index = body_index
+                continue
+        elif (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function_token)
+            and function_index + 1 < len(current_tokens)
+            and current_tokens[function_index + 1] == "()"
+        ):
+            body_index = function_index + 2
+        if body_index is not None:
+            if (
+                body_index >= len(current_tokens)
+                or current_tokens[body_index] not in {"{", "("}
+            ):
+                return _CommandInvocation(current_tokens, None, None, False)
+            index = body_index + 1
+            continue
+
         wrapper_index = index
         name = _normalized_executable_name(current_tokens[index])
         if name == "busybox":
             applet_index = index + 1
             if applet_index < len(current_tokens) and not current_tokens[applet_index].startswith("-"):
-                return _CommandInvocation(
-                    current_tokens,
-                    _normalized_executable_name(current_tokens[applet_index]),
-                    applet_index,
+                return _command_invocation(
+                    current_tokens[applet_index:],
+                    depth + 1,
                 )
             return _CommandInvocation(current_tokens, name, wrapper_index)
-        if name not in {"command", "env", "exec", "sudo", "nohup", "time", "timeout"}:
+        if name not in {
+            "builtin",
+            "chrt",
+            "command",
+            "doas",
+            "env",
+            "exec",
+            "ionice",
+            "nice",
+            "nohup",
+            "setsid",
+            "stdbuf",
+            "sudo",
+            "taskset",
+            "time",
+            "timeout",
+            "xargs",
+        }:
             return _CommandInvocation(current_tokens, name, index)
         index += 1
+
+        if name == "builtin":
+            while index < len(current_tokens) and current_tokens[index] in {"-a", "--"}:
+                index += 1
+            if (
+                index >= len(current_tokens)
+                or _normalized_executable_name(current_tokens[index])
+                not in {"command", "eval", "exec"}
+            ):
+                return _CommandInvocation(current_tokens, "builtin", wrapper_index)
+            continue
 
         if name == "command":
             while index < len(current_tokens) and current_tokens[index].startswith("-"):
@@ -2081,7 +2521,9 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
                 elif argument.startswith("-S") and argument != "-S":
                     split_string = argument[2:]
                 if split_string is not None:
-                    embedded_tokens, complete = _tokenize_shell_line(split_string)
+                    embedded_tokens, complete = _tokenize_shell_line(
+                        _decode_shell_literal_operators(split_string)
+                    )
                     if not complete or not embedded_tokens:
                         return _CommandInvocation(current_tokens, None, None, False)
                     return _command_invocation(
@@ -2142,6 +2584,184 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
                 return _CommandInvocation(current_tokens, "nohup", wrapper_index)
             continue
 
+        if name == "chrt":
+            pid_mode = False
+            options_with_value = {
+                "-D", "--sched-deadline", "-P", "--sched-period",
+                "-T", "--sched-runtime",
+            }
+            options_without_value = {
+                "-a", "--all-tasks", "-b", "--batch", "-d", "--deadline",
+                "-f", "--fifo", "-i", "--idle", "-m", "--max",
+                "-o", "--other", "-R", "--reset-on-fork", "-r", "--rr",
+                "-v", "--verbose",
+            }
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                option = argument.split("=", 1)[0]
+                if option in {"-p", "--pid"}:
+                    pid_mode = True
+                    index += 1
+                    continue
+                if option not in options_with_value and option not in options_without_value:
+                    return _CommandInvocation(current_tokens, None, None, False)
+                index += 1
+                if option in options_with_value and "=" not in argument:
+                    if index >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    index += 1
+            if pid_mode:
+                return _CommandInvocation(current_tokens, "chrt", wrapper_index)
+            if index + 1 >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            index += 1  # scheduling priority
+            continue
+
+        if name == "doas":
+            shell_mode = False
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                if argument in {"-L", "-n"}:
+                    index += 1
+                    continue
+                if argument == "-s":
+                    shell_mode = True
+                    index += 1
+                    continue
+                if argument in {"-C", "-u"}:
+                    if index + 1 >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    index += 2
+                    continue
+                return _CommandInvocation(current_tokens, None, None, False)
+            if shell_mode:
+                return _CommandInvocation(current_tokens, "doas", wrapper_index)
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            continue
+
+        if name == "ionice":
+            process_mode = False
+            options_with_value = {"-c", "--class", "-n", "--classdata"}
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                option = argument.split("=", 1)[0]
+                if option in {"-p", "--pid", "-P", "--pgid", "-u", "--uid"}:
+                    process_mode = True
+                    index += 1
+                    if "=" not in argument and index < len(current_tokens):
+                        index += 1
+                    continue
+                if option in {"-t", "--ignore"}:
+                    index += 1
+                    continue
+                if option not in options_with_value:
+                    return _CommandInvocation(current_tokens, None, None, False)
+                index += 1
+                if "=" not in argument:
+                    if index >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    index += 1
+            if process_mode:
+                return _CommandInvocation(current_tokens, "ionice", wrapper_index)
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            continue
+
+        if name == "nice":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                if re.fullmatch(r"-\d+", argument):
+                    index += 1
+                    continue
+                option = argument.split("=", 1)[0]
+                if option not in {"-n", "--adjustment"}:
+                    return _CommandInvocation(current_tokens, None, None, False)
+                index += 1
+                if "=" not in argument:
+                    if index >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    index += 1
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            continue
+
+        if name == "setsid":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                if argument not in {"-c", "--ctty", "-f", "--fork", "-w", "--wait"}:
+                    return _CommandInvocation(current_tokens, None, None, False)
+                index += 1
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            continue
+
+        if name == "stdbuf":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                option = argument.split("=", 1)[0]
+                if option in {"--input", "--output", "--error"}:
+                    index += 1
+                    if "=" not in argument:
+                        if index >= len(current_tokens):
+                            return _CommandInvocation(current_tokens, None, None, False)
+                        index += 1
+                    continue
+                if re.fullmatch(r"-[ioe].+", argument):
+                    index += 1
+                    continue
+                if argument in {"-i", "-o", "-e"}:
+                    if index + 1 >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    index += 2
+                    continue
+                return _CommandInvocation(current_tokens, None, None, False)
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            continue
+
+        if name == "taskset":
+            pid_mode = False
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                if argument.startswith("--"):
+                    if argument not in {"--all-tasks", "--cpu-list", "--pid"}:
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    pid_mode = pid_mode or argument == "--pid"
+                else:
+                    flags = argument[1:]
+                    if not flags or any(flag not in "acp" for flag in flags):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    pid_mode = pid_mode or "p" in flags
+                index += 1
+            if pid_mode:
+                return _CommandInvocation(current_tokens, "taskset", wrapper_index)
+            if index + 1 >= len(current_tokens):
+                return _CommandInvocation(current_tokens, None, None, False)
+            index += 1  # CPU mask or list
+            continue
+
         if name == "time":
             while index < len(current_tokens) and current_tokens[index].startswith("-"):
                 argument = current_tokens[index]
@@ -2181,30 +2801,256 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
             index += 1  # duration
             continue
 
+        if name == "xargs":
+            options_with_value = {
+                "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof",
+                "-I", "--replace", "-L", "--max-lines", "-n", "--max-args",
+                "-P", "--max-procs", "-s", "--max-chars",
+            }
+            options_without_value = {
+                "-0", "--null", "-o", "--open-tty", "-p", "--interactive",
+                "-r", "--no-run-if-empty", "-t", "--verbose", "-x", "--exit",
+            }
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                option = argument.split("=", 1)[0]
+                if option not in options_with_value and option not in options_without_value:
+                    return _CommandInvocation(current_tokens, None, None, False)
+                index += 1
+                if option in options_with_value and "=" not in argument:
+                    if index >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    index += 1
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, "xargs", wrapper_index)
+            continue
+
     return _CommandInvocation(current_tokens, None, None)
 
 
 def _shell_command_name(tokens: Sequence[str]) -> str | None:
     invocation = _command_invocation(tokens)
-    return invocation.executable if invocation.complete else None
+    if not invocation.complete:
+        return None
+    if invocation.executable == "eval" and invocation.executable_index is not None:
+        payload = _decode_shell_literal_operators(
+            " ".join(invocation.tokens[invocation.executable_index + 1 :])
+        )
+        payload_tokens, complete = _tokenize_shell_line(payload)
+        if not complete or not payload_tokens:
+            return None
+        nested = _command_invocation(payload_tokens, 1)
+        return nested.executable if nested.complete else None
+    return invocation.executable
 
 
 def _normalized_executable_name(value: str) -> str:
-    name = value.strip("(){}[]").lstrip("@+-").replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name[:-4] if name.endswith(".exe") else name
+    stripped = value.strip("(){}[]").lstrip("@+-")
+    path_name = stripped.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    path_name = path_name[:-4] if path_name.endswith(".exe") else path_name
+    shell_name = stripped.replace("\\", "").lower()
+    shell_name = shell_name[:-4] if shell_name.endswith(".exe") else shell_name
+    security_relevant_names = {
+        ".", "source", "ash", "bash", "builtin", "busybox", "chrt", "cmd", "command",
+        "csh", "curl", "dash", "doas", "env", "eval", "exec", "ionice", "ksh", "mksh", "nice",
+        "node", "nohup", "perl", "php", "powershell", "pwsh", "python", "python2",
+        "python3", "ruby", "setsid", "sh", "stdbuf", "sudo", "taskset", "time",
+        "timeout", "wget", "xargs", "zsh",
+    }
+    return shell_name if shell_name in security_relevant_names else path_name
 
 
 def _pipeline_has_remote_shell(commands: Sequence[Sequence[str]]) -> bool:
     names = [_shell_command_name(command) for command in commands]
     fetchers = {"curl", "wget"}
-    shells = {
-        "bash", "csh", "dash", "ksh", "sh", "zsh", "python", "python2",
-        "python3", "node", "perl", "ruby", "php", "powershell", "pwsh",
+    shells = _COMMAND_INTERPRETERS
+    saw_fetcher = False
+    for name in names:
+        if name in fetchers:
+            saw_fetcher = True
+        elif saw_fetcher and name in shells:
+            return True
+    return False
+
+
+def _pipeline_has_ambiguous_remote_shell(commands: Sequence[Sequence[str]]) -> bool:
+    """Fail closed when an unknown launcher precedes a fetcher token."""
+
+    names = [_shell_command_name(command) for command in commands]
+    shells = _COMMAND_INTERPRETERS
+    non_launching_data_commands = {
+        "cat", "command", "echo", "grep", "head", "printf", "tail", "tee", "wc"
     }
-    return any(
-        name in fetchers and any(later in shells for later in names[index + 1 :])
-        for index, name in enumerate(names)
-    )
+    shell_after = [False] * len(commands)
+    ambiguous_launcher_after = [False] * len(commands)
+    saw_shell = False
+    saw_ambiguous_launcher = False
+    for index in range(len(commands) - 1, -1, -1):
+        shell_after[index] = saw_shell
+        ambiguous_launcher_after[index] = saw_ambiguous_launcher
+        name = names[index]
+        saw_shell = saw_shell or name in shells
+        if name not in shells and name not in non_launching_data_commands and any(
+            _normalized_executable_name(token) in shells for token in commands[index]
+        ):
+            saw_ambiguous_launcher = True
+
+    for index, command in enumerate(commands):
+        name = names[index]
+        if name in {"curl", "wget"}:
+            if ambiguous_launcher_after[index]:
+                return True
+            continue
+        if name in non_launching_data_commands:
+            continue
+        if not any(
+            _normalized_executable_name(token) in {"curl", "wget"}
+            for token in command
+        ):
+            continue
+        if shell_after[index]:
+            return True
+    return False
+
+
+def _compound_group_before_pipe(
+    tokens: Sequence[str], pipe_index: int, max_steps: int
+) -> tuple[tuple[str, ...] | None, int, bool]:
+    """Return a syntactic compound command whose aggregate output reaches a pipe."""
+
+    if pipe_index <= 0:
+        return None, 0, True
+    steps = 0
+    closing_index = pipe_index - 1
+    while closing_index >= 0:
+        redirection_index: int | None = None
+        redirection = tokens[closing_index]
+        if _SHELL_REDIRECTION_RE.fullmatch(redirection) is not None:
+            redirection_index = closing_index
+        elif (
+            closing_index > 0
+            and _SHELL_REDIRECTION_RE.fullmatch(tokens[closing_index - 1]) is not None
+        ):
+            redirection_index = closing_index - 1
+            redirection = tokens[redirection_index]
+        if redirection_index is None:
+            break
+        steps += closing_index - redirection_index + 1
+        if steps > max_steps:
+            return None, steps, False
+        descriptor_match = re.match(r"(?:([0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\}))?", redirection)
+        descriptor = descriptor_match.group(1) if descriptor_match is not None else None
+        operator = redirection[len(descriptor or "") :]
+        if operator.startswith((">", "&>")) and descriptor in {None, "1"}:
+            return None, steps, False
+        closing_index = redirection_index - 1
+    if closing_index < 0:
+        return None, steps, True
+    closing = tokens[closing_index]
+    if closing == "}" or closing.endswith(")"):
+        opening = "{" if closing == "}" else "("
+        depth = 1 if closing == "}" else len(closing) - len(closing.rstrip(")"))
+        start: int | None = None
+        for index in range(closing_index - 1, -1, -1):
+            steps += 1
+            if steps > max_steps:
+                return None, steps, False
+            candidate = tokens[index]
+            if opening == "{" and candidate == "}":
+                depth += 1
+            elif opening == "{" and candidate == "{":
+                depth -= 1
+            elif opening == "(":
+                depth += len(candidate) - len(candidate.rstrip(")"))
+                depth -= len(candidate) - len(candidate.lstrip("("))
+            if depth == 0:
+                start = index
+                break
+    elif closing in {"fi", "done", "esac"}:
+        opening_words = {
+            "fi": {"if"},
+            "done": {"for", "select", "until", "while"},
+            "esac": {"case"},
+        }[closing]
+        depth = 1
+        start = None
+        for index in range(closing_index - 1, -1, -1):
+            steps += 1
+            if steps > max_steps:
+                return None, steps, False
+            if tokens[index] == closing:
+                depth += 1
+            elif tokens[index] in opening_words:
+                depth -= 1
+                if depth == 0:
+                    start = index
+                    break
+    else:
+        return None, 0, True
+    if start is None:
+        return None, steps, True
+    if start and not (
+        tokens[start - 1] == "!"
+        or (
+            tokens[start - 1]
+            and all(character in "|;&" for character in tokens[start - 1])
+        )
+    ):
+        return None, steps, True
+    return tuple(tokens[start : closing_index + 1]), steps, True
+
+
+def _tokens_have_compound_remote_pipeline(tokens: Sequence[str]) -> tuple[bool, bool]:
+    """Classify fetchers inside compound commands piped into interpreters."""
+
+    fetchers = {"curl", "wget"}
+    non_launching_data_commands = {
+        "cat", "command", "echo", "grep", "head", "printf", "tail", "tee", "wc"
+    }
+    remaining_work = max(4_096, len(tokens) * 4)
+    for pipe_index, token in enumerate(tokens):
+        if token not in {"|", "|&"}:
+            continue
+        downstream: list[str] = []
+        cursor = pipe_index + 1
+        while cursor < len(tokens):
+            candidate = tokens[cursor]
+            if candidate and all(character in "|;&" for character in candidate):
+                break
+            downstream.append(candidate)
+            cursor += 1
+        downstream_name = _shell_command_name(downstream)
+        if downstream_name in non_launching_data_commands:
+            continue
+        downstream_has_interpreter = any(
+            _normalized_executable_name(candidate) in _COMMAND_INTERPRETERS
+            for candidate in downstream
+        )
+        if downstream_name not in _COMMAND_INTERPRETERS and not downstream_has_interpreter:
+            continue
+        group, consumed, complete = _compound_group_before_pipe(
+            tokens, pipe_index, remaining_work
+        )
+        remaining_work = max(0, remaining_work - consumed)
+        if not complete:
+            return False, True
+        if group is None:
+            continue
+        group_commands = _simple_shell_commands(group)
+        names = [_shell_command_name(command) for command in group_commands]
+        if any(name in fetchers for name in names):
+            if downstream_name in _COMMAND_INTERPRETERS:
+                return True, False
+            return False, True
+        for command, name in zip(group_commands, names):
+            if name in non_launching_data_commands:
+                continue
+            if any(_normalized_executable_name(part) in fetchers for part in command):
+                return False, True
+    return False, False
 
 
 def _tokens_have_remote_pipeline(tokens: Sequence[str]) -> bool:
@@ -2232,8 +3078,48 @@ def _tokens_have_remote_pipeline(tokens: Sequence[str]) -> bool:
     return finish_pipeline()
 
 
+def _tokens_have_ambiguous_remote_pipeline(tokens: Sequence[str]) -> bool:
+    pipeline: list[list[str]] = []
+    command: list[str] = []
+
+    def finish_pipeline() -> bool:
+        nonlocal pipeline, command
+        if command:
+            pipeline.append(command)
+        found = len(pipeline) > 1 and _pipeline_has_ambiguous_remote_shell(pipeline)
+        pipeline = []
+        command = []
+        return found
+
+    for token in tokens:
+        if token in {"|", "|&"}:
+            pipeline.append(command)
+            command = []
+        elif token and all(character in "|;&" for character in token):
+            if finish_pipeline():
+                return True
+        else:
+            command.append(token)
+    return finish_pipeline()
+
+
+def _simple_shell_commands(tokens: Sequence[str]) -> list[list[str]]:
+    commands: list[list[str]] = []
+    command: list[str] = []
+    for token in tokens:
+        if token and all(character in "|;&" for character in token):
+            if command:
+                commands.append(command)
+            command = []
+        else:
+            command.append(token)
+    if command:
+        commands.append(command)
+    return commands
+
+
 def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
-    shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
+    shells = {"ash", "bash", "csh", "dash", "ksh", "mksh", "sh", "zsh"}
     interpreter_options = {
         "python": {"-c"}, "python2": {"-c"}, "python3": {"-c"},
         "node": {"-e", "--eval"}, "perl": {"-e"}, "ruby": {"-e"},
@@ -2267,20 +3153,30 @@ def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
         if executable == "cmd":
             for index in range(executable_index + 1, len(invocation_arguments) - 1):
                 if invocation_arguments[index].lower() in {"/c", "/k"}:
-                    payloads.append(" ".join(invocation_arguments[index + 1 :]))
+                    payloads.append(
+                        _decode_shell_literal_operators(
+                            " ".join(invocation_arguments[index + 1 :])
+                        )
+                    )
                     break
             continue
 
         if executable == "eval":
             if executable_index + 1 < len(invocation_arguments):
-                payloads.append(" ".join(invocation_arguments[executable_index + 1 :]))
+                payloads.append(
+                    _decode_shell_literal_operators(
+                        " ".join(invocation_arguments[executable_index + 1 :])
+                    )
+                )
             continue
 
         if executable in interpreter_options:
             accepted = interpreter_options[executable]
             for index in range(executable_index + 1, len(invocation_arguments) - 1):
                 if invocation_arguments[index].lower() in accepted:
-                    payloads.append(invocation_arguments[index + 1])
+                    payloads.append(
+                        _decode_shell_literal_operators(invocation_arguments[index + 1])
+                    )
                     break
             continue
 
@@ -2306,7 +3202,9 @@ def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
                 ):
                     payload_index += 1
                 if payload_index < len(invocation_arguments):
-                    payloads.append(invocation_arguments[payload_index])
+                    payloads.append(
+                        _decode_shell_literal_operators(invocation_arguments[payload_index])
+                    )
                 break
             option_name = option.split("=", 1)[0]
             if option_name in shell_options_with_value and "=" not in option:
@@ -2316,10 +3214,12 @@ def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
     return payloads, True
 
 
-def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
-    """Extract executable command/process substitutions without evaluating them."""
+def _command_substitution_payloads(
+    command: str,
+) -> tuple[list[tuple[str, str]], bool]:
+    """Extract typed command/process substitutions without evaluating them."""
 
-    payloads: list[str] = []
+    payloads: list[tuple[str, str]] = []
     quote_character: str | None = None
     escaped = False
     index = 0
@@ -2368,7 +3268,13 @@ def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
                 elif inner_quote is None and current == ")":
                     depth -= 1
                     if depth == 0:
-                        payloads.append(command[start:cursor])
+                        if is_command_substitution:
+                            kind = "command"
+                        elif character == "<":
+                            kind = "process-input"
+                        else:
+                            kind = "process-output"
+                        payloads.append((kind, command[start:cursor]))
                         index = cursor + 1
                         break
                 cursor += 1
@@ -2385,7 +3291,7 @@ def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
                 elif current == "\\":
                     inner_escaped = True
                 elif current == "`":
-                    payloads.append(command[index + 1 : cursor])
+                    payloads.append(("command", command[index + 1 : cursor]))
                     index = cursor + 1
                     break
                 cursor += 1
@@ -2402,6 +3308,7 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
     tokens: list[str] = []
     current: list[str] = []
     quote_character: str | None = None
+    ansi_c_quote = False
     escaped = False
     index = 0
 
@@ -2410,16 +3317,51 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
             tokens.append("".join(current))
             current.clear()
 
+    def append_literal(character: str) -> None:
+        current.append(_SHELL_LITERAL_OPERATOR_CODES.get(character, character))
+
     while index < len(command):
         character = command[index]
         if escaped:
-            current.append(character)
+            append_literal(character)
             escaped = False
             index += 1
             continue
         if quote_character is not None:
             if character == quote_character:
                 quote_character = None
+                ansi_c_quote = False
+            elif ansi_c_quote and character == "\\" and index + 1 < len(command):
+                escape = command[index + 1]
+                simple_escapes = {
+                    "a": "\a", "b": "\b", "e": "\x1b", "f": "\f", "n": "\n",
+                    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"',
+                }
+                if escape in simple_escapes:
+                    append_literal(simple_escapes[escape])
+                    index += 2
+                    continue
+                widths = {"x": 2, "u": 4, "U": 8}
+                width = widths.get(escape)
+                if width is not None:
+                    digits = command[index + 2 : index + 2 + width]
+                    if len(digits) == width and all(value in "0123456789abcdefABCDEF" for value in digits):
+                        try:
+                            append_literal(chr(int(digits, 16)))
+                        except ValueError:
+                            pass
+                        index += 2 + width
+                        continue
+                if escape in "01234567":
+                    end = index + 2
+                    while end < min(len(command), index + 5) and command[end] in "01234567":
+                        end += 1
+                    append_literal(chr(int(command[index + 1 : end], 8)))
+                    index = end
+                    continue
+                current.extend(("\\", escape))
+                index += 2
+                continue
             elif character == "\\" and quote_character == '"':
                 if (
                     index + 1 < len(command)
@@ -2429,10 +3371,14 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
                 else:
                     current.append(character)
             else:
-                current.append(character)
+                append_literal(character)
             index += 1
             continue
         if character in {'"', "'"}:
+            is_dollar_quote = bool(current and current[-1] == "$")
+            if is_dollar_quote:
+                current.pop()
+            ansi_c_quote = is_dollar_quote and character == "'"
             quote_character = character
             index += 1
             continue
@@ -2452,18 +3398,37 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
         if character in "<>" or (
             character == "&" and index + 1 < len(command) and command[index + 1] == ">"
         ):
-            finish_token()
+            descriptor_prefix = ""
+            current_value = "".join(current)
+            if re.fullmatch(r"(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})", current_value):
+                descriptor_prefix = current_value
+                current.clear()
+            else:
+                finish_token()
             end = index + 1
             if character == "&":
                 end += 1
+                if end < len(command) and command[end] == ">":
+                    end += 1
             else:
                 while end < len(command) and command[end] == character:
                     end += 1
-                if end < len(command) and command[end] == "&":
+                if character == "<" and end < len(command) and command[end] == ">":
                     end += 1
-            while end < len(command) and (command[end].isdigit() or command[end] == "-"):
-                end += 1
-            tokens.append(command[index:end])
+                elif character == ">" and end < len(command) and command[end] == "|":
+                    end += 1
+                if (
+                    character == "<"
+                    and end - index == 2
+                    and end < len(command)
+                    and command[end] == "-"
+                ):
+                    end += 1
+                elif end < len(command) and command[end] == "&":
+                    end += 1
+                    while end < len(command) and (command[end].isdigit() or command[end] == "-"):
+                        end += 1
+            tokens.append(descriptor_prefix + command[index:end])
             index = end
             continue
         if character in "|;&":
@@ -2480,52 +3445,182 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
     return tokens, quote_character is None and not escaped
 
 
-def _remote_pipeline_status(command: str, depth: int = 0) -> tuple[bool, bool]:
+def _has_remote_execution_syntax(command: str) -> bool:
+    return (
+        "|" in command
+        or any(marker in command for marker in ("$(", "<(", ">(", "`"))
+        or _SHELL_ENCODED_PIPE_RE.search(command) is not None
+    )
+
+
+def _has_remote_fetcher_hint(command: str) -> bool:
+    return (
+        _REMOTE_FETCHER_RE.search(command) is not None
+        or _REMOTE_FETCHER_OBFUSCATED_RE.search(command) is not None
+    )
+
+
+def _generated_shell_output_status(
+    tokens: Sequence[str],
+    depth: int,
+) -> tuple[bool, bool]:
+    invocation = _command_invocation(tokens)
+    if (
+        not invocation.complete
+        or invocation.executable not in {"echo", "printf"}
+        or invocation.executable_index is None
+    ):
+        return False, False
+    arguments = [
+        _decode_shell_literal_operators(argument)
+        for argument in invocation.tokens[invocation.executable_index + 1 :]
+    ]
+    for generated_payload in (*arguments, " ".join(arguments)):
+        detected, unparsed = _remote_pipeline_status(
+            generated_payload,
+            depth + 1,
+            True,
+        )
+        if detected or unparsed:
+            return detected, unparsed
+    return False, False
+
+
+def _remote_pipeline_status(
+    command: str,
+    depth: int = 0,
+    shell_payload: bool = False,
+) -> tuple[bool, bool]:
     """Return (detected, unparsed) for a bounded shell-like command string."""
 
     contexts = _contextual_shell_commands(command)
     normalized_input = command.strip()
     if contexts != [normalized_input]:
         for context in contexts:
-            detected, unparsed = _remote_pipeline_status(context, depth)
+            detected, unparsed = _remote_pipeline_status(context, depth, shell_payload)
             if detected or unparsed:
                 return detected, unparsed
         return False, False
     command = normalized_input
-    if "|" not in command or re.search(
-        r"\b(?:curl|wget)(?:\.exe)?\b", command, re.IGNORECASE
-    ) is None:
+    if not _has_remote_execution_syntax(command) or not _has_remote_fetcher_hint(command):
         return False, False
+    if re.search(r"\^[\^|&<>]", command):
+        # Caret escaping changes meaning between POSIX shells and cmd.exe. The
+        # path-agnostic scanner cannot safely choose one grammar.
+        return False, True
     if depth > 4:
         return False, True
     tokens, complete = _tokenize_shell_line(command)
     if not complete:
         return False, True
+    if len(tokens) > MAX_SHELL_CLASSIFICATION_TOKENS:
+        return False, True
+    if tokens and tokens[-1] in {"|", "|&", "||"}:
+        return False, True
+    compound_detected, compound_unparsed = _tokens_have_compound_remote_pipeline(tokens)
+    if compound_detected or compound_unparsed:
+        return compound_detected, compound_unparsed
     if _tokens_have_remote_pipeline(tokens):
         return True, False
+    if _tokens_have_ambiguous_remote_pipeline(tokens):
+        return False, True
+
+    simple_commands = _simple_shell_commands(tokens)
+    simple_names = [_shell_command_name(item) for item in simple_commands]
+    interpreter_names = _COMMAND_INTERPRETERS
+    interpreter_after = [False] * len(simple_names)
+    saw_interpreter = False
+    for index in range(len(simple_names) - 1, -1, -1):
+        interpreter_after[index] = saw_interpreter
+        saw_interpreter = saw_interpreter or simple_names[index] in interpreter_names
+    for command_index, simple_command in enumerate(simple_commands):
+        invocation = _command_invocation(simple_command)
+        if (
+            not invocation.complete
+            or invocation.executable not in {"echo", "printf"}
+            or invocation.executable_index is None
+            or not interpreter_after[command_index]
+        ):
+            continue
+        detected, unparsed = _generated_shell_output_status(simple_command, depth)
+        if detected or unparsed:
+            return detected, unparsed
+
+    for simple_command, simple_name in zip(simple_commands, simple_names):
+        if simple_name not in interpreter_names:
+            continue
+        for token_index, token in enumerate(simple_command[:-1]):
+            if _SHELL_REDIRECTION_RE.fullmatch(token) is None or not token.endswith("<<<"):
+                continue
+            detected, unparsed = _remote_pipeline_status(
+                _decode_shell_literal_operators(simple_command[token_index + 1]),
+                depth + 1,
+                True,
+            )
+            if detected or unparsed:
+                return detected, unparsed
 
     nested_payloads, payloads_complete = _shell_command_payloads(tokens)
     if not payloads_complete:
         return False, True
-    substitution_payloads, substitutions_complete = _command_substitution_payloads(command)
+    substitutions, substitutions_complete = _command_substitution_payloads(command)
     if not substitutions_complete:
         return False, True
-    for payload in (*nested_payloads, *substitution_payloads):
-        detected, unparsed = _remote_pipeline_status(payload, depth + 1)
+
+    outer_names = [_shell_command_name(item) for item in simple_commands]
+    outer_has_fetcher = any(name in {"curl", "wget"} for name in outer_names)
+    outer_has_shell = any(
+        name in interpreter_names
+        for name in outer_names
+    )
+    for kind, payload in substitutions:
+        payload_tokens, substitution_complete = _tokenize_shell_line(payload)
+        if not substitution_complete:
+            return False, True
+        payload_name = _shell_command_name(payload_tokens) if payload_tokens else None
+        if outer_has_fetcher and kind == "process-output" and payload_name in interpreter_names:
+            return True, False
+        if outer_has_shell and kind == "process-input" and payload_name in {"curl", "wget"}:
+            return True, False
+        substitution_becomes_code = kind == "command" and (
+            shell_payload or (outer_has_shell and "<<<" in command)
+        )
+        if substitution_becomes_code:
+            if payload_name in {"curl", "wget"}:
+                return True, False
+            detected, unparsed = _generated_shell_output_status(payload_tokens, depth)
+            if detected or unparsed:
+                return detected, unparsed
+
+    for payload in nested_payloads:
+        detected, unparsed = _remote_pipeline_status(payload, depth + 1, True)
+        if detected or unparsed:
+            return detected, unparsed
+    for _kind, payload in substitutions:
+        detected, unparsed = _remote_pipeline_status(payload, depth + 1, False)
         if detected or unparsed:
             return detected, unparsed
     return False, False
 
 
 def _remote_pipe_line_numbers(text: str) -> tuple[list[int], list[int]]:
+    if not _has_remote_execution_syntax(text) or not _has_remote_fetcher_hint(text):
+        return [], []
     findings: list[int] = []
     unparsed: list[int] = []
-    for start_line, logical_command in _logical_shell_commands(text):
-        detected, could_not_parse = _remote_pipeline_status(logical_command)
-        if detected:
-            findings.append(start_line)
-        elif could_not_parse:
-            unparsed.append(start_line)
+    for command_source in (
+        _logical_shell_commands(text),
+        _yaml_folded_shell_commands(text),
+    ):
+        for start_line, logical_command, shell_payload in command_source:
+            detected, could_not_parse = _remote_pipeline_status(
+                logical_command,
+                shell_payload=shell_payload,
+            )
+            if detected:
+                findings.append(start_line)
+            elif could_not_parse:
+                unparsed.append(start_line)
     return sorted(set(findings)), sorted(set(unparsed))
 
 
@@ -2622,33 +3717,135 @@ def _firebase_quoted_positions(text: str) -> bytearray:
 
 
 def _firebase_or_true_offsets(text: str) -> Iterable[int]:
-    """Find a literal true operand adjacent to OR with bounded local work."""
+    """Find true literal operands adjacent to OR in one bounded regex pass."""
 
-    search_from = 0
-    while True:
-        operator = text.find("||", search_from)
-        if operator < 0:
-            return
-        right = operator + 2
-        right_limit = min(len(text), right + 4_096)
-        while right < right_limit and (text[right].isspace() or text[right] == "("):
-            right += 1
-        right_true = text[right : right + 4].lower() == "true" and (
-            right + 4 >= len(text) or not (text[right + 4].isalnum() or text[right + 4] == "_")
-        )
-        left = operator - 1
-        left_limit = max(-1, operator - 4_096)
-        while left > left_limit and (text[left].isspace() or text[left] == ")"):
+    for match in _FIREBASE_TRUE_OPERAND_RE.finditer(text):
+        expression = match.group("expression")
+        if not _firebase_literal_equality_is_true(expression):
+            continue
+        before_expression = match.start()
+        while before_expression and text[before_expression - 1].isspace():
+            before_expression -= 1
+        after_expression = match.end()
+        while after_expression < len(text) and text[after_expression].isspace():
+            after_expression += 1
+        if (
+            text[max(0, before_expression - 2) : before_expression] in {"==", "!="}
+            or text[after_expression : after_expression + 2] in {"==", "!="}
+        ):
+            continue
+        left = match.start()
+        while left and (text[left - 1].isspace() or text[left - 1] == "("):
             left -= 1
-        left_start = left - 3
-        left_true = left_start >= 0 and text[left_start : left + 1].lower() == "true" and (
-            left_start == 0 or not (text[left_start - 1].isalnum() or text[left_start - 1] == "_")
-        )
-        if right_true:
-            yield right
-        elif left_true:
-            yield left_start
-        search_from = operator + 2
+        right = match.end()
+        while right < len(text) and (text[right].isspace() or text[right] == ")"):
+            right += 1
+        if text[max(0, left - 2) : left] == "||" or text[right : right + 2] == "||":
+            yield match.start()
+
+
+def _firebase_literal_equality_is_true(expression: str) -> bool:
+    match = _FIREBASE_LITERAL_EQUALITY_RE.search(expression)
+    if match is None:
+        return True
+    left = match.group("left")
+    right = match.group("right")
+    if left.lower() == "null" or right.lower() == "null":
+        return left.lower() == right.lower() == "null"
+    if left[:1] in {'"', "'"} or right[:1] in {'"', "'"}:
+        if left == right:
+            return True
+        if "\\" not in left and "\\" not in right:
+            return left[1:-1] == right[1:-1]
+        return False
+    try:
+        return Decimal(left) == Decimal(right)
+    except InvalidOperation:
+        return False
+
+
+def _firebase_rtd_key_at(
+    text: str,
+    index: int,
+    quoted_positions: Sequence[int],
+) -> bool:
+    """Recognize a structural RTDB .read/.write key, not text inside a value."""
+
+    if index >= len(text) or (index < len(quoted_positions) and quoted_positions[index]):
+        return False
+    cursor = index
+    quote = ""
+    if text[cursor] in {'"', "'"}:
+        quote = text[cursor]
+        cursor += 1
+    key = next(
+        (candidate for candidate in (".read", ".write") if text.startswith(candidate, cursor)),
+        None,
+    )
+    if key is None:
+        return False
+    cursor += len(key)
+    if quote:
+        if cursor >= len(text) or text[cursor] != quote:
+            return False
+        cursor += 1
+    elif cursor < len(text) and (text[cursor].isalnum() or text[cursor] in "_."):
+        return False
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    return cursor < len(text) and text[cursor] == ":"
+
+
+def _firebase_contextual_or_true_offsets(
+    text: str,
+    quoted_positions: Sequence[int],
+) -> Iterable[tuple[int, bool]]:
+    """Classify OR-true offsets with one forward context pass."""
+
+    offsets = iter(_firebase_or_true_offsets(text))
+    next_offset = next(offsets, None)
+    if next_offset is None:
+        return
+    lowered = text.lower()
+    statement_has_allow = False
+    statement_has_if = False
+    rtd_has_key = False
+    rtd_has_colon = False
+    for index, character in enumerate(lowered):
+        is_quoted = index < len(quoted_positions) and bool(quoted_positions[index])
+        if character == ";" and not is_quoted:
+            statement_has_allow = False
+            statement_has_if = False
+            rtd_has_key = False
+            rtd_has_colon = False
+        elif character == "," and not is_quoted:
+            rtd_has_key = False
+            rtd_has_colon = False
+        if lowered.startswith("allow ", index):
+            statement_has_allow = True
+        if character == ":":
+            condition = index + 1
+            while condition < len(lowered) and lowered[condition].isspace():
+                condition += 1
+            if lowered.startswith("if", condition) and (
+                condition + 2 >= len(lowered)
+                or not (
+                    lowered[condition + 2].isalnum()
+                    or lowered[condition + 2] == "_"
+                )
+            ):
+                statement_has_if = True
+        if _firebase_rtd_key_at(lowered, index, quoted_positions):
+            rtd_has_key = True
+            rtd_has_colon = True
+        while next_offset is not None and index == next_offset:
+            is_allow = statement_has_allow and statement_has_if
+            is_rtd = rtd_has_key and rtd_has_colon
+            if is_allow or is_rtd:
+                yield next_offset, is_rtd
+            next_offset = next(offsets, None)
+        if next_offset is None:
+            return
 
 
 def _sql_code_view(text: str) -> str:
@@ -2851,10 +4048,7 @@ def _scan_text(
                         or normalized_rules[key_start + len(key)] != opening_quote
                     ):
                         continue
-                integer_equality = _FIREBASE_INTEGER_EQUALITY_RE.search(match.group(0))
-                if integer_equality is not None and int(integer_equality.group(1)) != int(
-                    integer_equality.group(2)
-                ):
+                if not _firebase_literal_equality_is_true(match.group(0)):
                     continue
                 line_number = (
                     normalized_line_numbers[match.start()]
@@ -2862,21 +4056,10 @@ def _scan_text(
                     else 1
                 )
                 add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
-        for start in _firebase_or_true_offsets(normalized_rules):
-            statement_boundary = max(
-                normalized_rules.rfind(";", max(0, start - 4_096), start),
-                normalized_rules.rfind("{", max(0, start - 4_096), start),
-            )
-            statement_prefix = normalized_rules[statement_boundary + 1 : start].lower()
-            rtd_boundary = max(
-                statement_boundary,
-                normalized_rules.rfind(",", max(0, start - 4_096), start),
-            )
-            rtd_prefix = normalized_rules[rtd_boundary + 1 : start].lower()
-            is_allow_condition = "allow " in statement_prefix and ": if " in statement_prefix
-            is_rtd_condition = any(key in rtd_prefix for key in (".read", ".write")) and ":" in rtd_prefix
-            if not (is_allow_condition or is_rtd_condition):
-                continue
+        for start, is_rtd_condition in _firebase_contextual_or_true_offsets(
+            normalized_rules,
+            quoted_positions,
+        ):
             if quoted_positions[start] and not is_rtd_condition:
                 continue
             line_number = normalized_line_numbers[start] if start < len(normalized_line_numbers) else 1
@@ -2927,7 +4110,11 @@ def _scan_text(
             for name, script in scripts.items()
             if isinstance(name, str) and isinstance(script, str)
         }
-        script_line_numbers = _line_numbers_for_json_keys(lines, script_names)
+        script_line_numbers = _line_numbers_for_json_object_keys(
+            text,
+            "scripts",
+            script_names,
+        )
         for name, script in scripts.items():
             if isinstance(name, str) and isinstance(script, str):
                 script_line = script_line_numbers.get(name, 1)
@@ -3038,11 +4225,11 @@ def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tup
     if any(len(metadata[key]) > 512 or any(ord(character) < 32 for character in metadata[key]) for key in required):
         return False, None
     def normalized_identity(value: str) -> str:
-        normalized = unicodedata.normalize("NFKC", value)
+        normalized = unicodedata.normalize("NFKD", value)
         return "".join(
             character
             for character in normalized.casefold().strip()
-            if unicodedata.category(character) != "Cf" and not character.isspace()
+            if unicodedata.category(character)[:1] in {"L", "N"}
         )
 
     def normalized_required_value(value: str) -> str:
@@ -3053,7 +4240,14 @@ def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tup
             if unicodedata.category(character) != "Cf"
         ).strip()
 
-    if any(not normalized_required_value(metadata[key]) for key in required):
+    if any(
+        not normalized_required_value(metadata[key])
+        or not any(
+            unicodedata.category(character)[:1] in {"L", "N"}
+            for character in normalized_required_value(metadata[key])
+        )
+        for key in required
+    ):
         return False, None
     owner = normalized_identity(metadata["owner"])
     approver = normalized_identity(metadata["approved-by"])
@@ -3154,7 +4348,7 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         return report
 
     content_hashes: dict[bytes, bytes] = {}
-    path_values: set[str] = set()
+    path_values: dict[str, str] = {}
     path_value_characters = 0
     aggregate_bytes = 0
     readable_source_ids: set[bytes] = set()
@@ -3186,9 +4380,12 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         detected_values = _detected_assignment_values(
             text, code_context=_is_code_assignment_path(candidate.path)
         )
-        new_values = detected_values.difference(path_values)
-        path_values.update(new_values)
-        path_value_characters += sum(len(value) for value in new_values)
+        for raw_value in detected_values:
+            display_value = _safe_display_component(raw_value)
+            if not display_value or display_value == "." or display_value in path_values:
+                continue
+            path_values[display_value] = raw_value
+            path_value_characters += len(display_value)
         if (
             len(path_values) > MAX_PATH_REDACTION_VALUES
             or path_value_characters > MAX_PATH_REDACTION_PATTERN_CHARS
@@ -3205,7 +4402,7 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         _hide_incomplete_issue_paths(report)
         return report
 
-    candidates = _redact_content_values_from_paths(candidates, path_values)
+    candidates = _redact_content_values_from_paths(candidates, path_values.values())
     for candidate in candidates:
         rule_id: str | None = None
         if _is_sensitive_env(candidate.path.name):

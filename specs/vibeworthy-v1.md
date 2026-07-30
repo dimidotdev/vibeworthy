@@ -369,7 +369,7 @@ while linking to the full references for manual use.
 
 - Agent Skill contract: `skill/vibeworthy/SKILL.md`, one-level `references/`, optional `scripts/`, and
   `agents/openai.yaml` with no runtime service dependency.
-- Scanner CLI: `python preflight.py [PATH] [--format text|json|sarif] [--max-file-bytes N]`; exit `0`
+- Scanner CLI: `python -I preflight.py [PATH] [--format text|json|sarif] [--max-file-bytes N]`; isolated mode is mandatory so project-controlled Python startup/import hooks cannot run before scanning; exit `0`
   means no blocking finding, `1` means at least one blocking finding, and `2` means usage/tool failure.
 - Finding contract: stable rule ID, severity, relative normalized path, 1-based line where available,
   redacted message, remediation, and optional evidence category; never include matched source text.
@@ -474,6 +474,31 @@ while linking to the full references for manual use.
   expiring workflow artifact rather than a durable tag-gated GitHub Release. DEC-013 records the
   stricter evaluated-commit identity rule; the next candidate requires a new package audit and actual
   release evidence before publication. Evidence: `docs/audits/2026-07-30-candidate-8fbce132.md`.
+- AUDIT-HIST-009 | failed | Cross-platform CI rejected candidate
+  `e1b134f3309fdd696ead02dcd256fedc089238f9`: macOS executed synthetic Git through a
+  worktree-originated PATH symlink, Windows failed to reject the equivalent junction, and the Windows
+  SQL fixture exceeded its performance budget. Ubuntu passed, but a partial matrix is not release
+  evidence. Evidence: `docs/audits/2026-07-30-candidate-e1b134f.md` and the immutable
+  [CI run](https://github.com/dimidotdev/vibeworthy/actions/runs/30588227283).
+- AUDIT-HIST-010 | failed | The independent scanner audit of candidate
+  `e1b134f3309fdd696ead02dcd256fedc089238f9` reproduced repository-controlled Git and Python
+  startup execution; overlapping and canonically equivalent path disclosures; wrapper, control-flow,
+  redirection, function, and substitution evasions; incomplete Firebase tautologies and adversarial
+  runtime; an unsafe path-redaction memory budget; semantically empty suppression metadata; and
+  incorrect npm evidence locations. Every class requires a regression and a fresh audit on the next
+  exact commit. Evidence: `docs/audits/2026-07-30-candidate-e1b134f.md`.
+- AUDIT-HIST-011 | passed | The candidate-bound behavior audit of
+  `e1b134f3309fdd696ead02dcd256fedc089238f9` passed 12 full-skill/reduced-v0 decisions,
+  including REQ-012 identity, ledger, ownership, next-action, authority, and `NO-GO` requirements.
+  Because the candidate failed elsewhere, this historical pass is non-transferable and is not part of
+  the final 21-response suite. Evidence: `docs/audits/2026-07-30-candidate-e1b134f.md`; temporary raw
+  outputs were not retained or scored.
+- AUDIT-HIST-012 | failed | The independent package audit of candidate
+  `e1b134f3309fdd696ead02dcd256fedc089238f9` accepted its package and release design but rejected
+  the failed CI matrix, credential-persisting CI checkout, misleading prerelease rehearsal example,
+  and missing external `github-release` environment/tag policy and real publication evidence. The
+  next exact candidate requires fresh package review; external promotion controls remain a pre-tag
+  gate. Evidence: `docs/audits/2026-07-30-candidate-e1b134f.md`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -605,6 +630,19 @@ while linking to the full references for manual use.
   the reviewed repository state and distributed source identity unambiguous. Post-release evidence
   may be recorded in a later documentation commit without changing the tag. | affects: REQ-009,
   REQ-014, REQ-021
+- DEC-014 | Treat the outermost visible enclosing Git marker as part of the controlled source boundary
+  without invoking repository Git. | rationale: a nested marker or nested scan target must not narrow
+  trust and make a sibling repository executable eligible through PATH; reject intersecting lexical
+  and resolved origins, then use the documented filesystem fallback when trusted Git is unavailable.
+  | affects: REQ-010, REQ-011
+- DEC-015 | Require Python isolated mode for every preflight-scanner launcher. | rationale: project-
+  controlled `PYTHONPATH`, `sitecustomize`, or shadow standard-library modules can execute before any
+  in-script guard; `python -I` is therefore part of the security boundary, not an optional invocation
+  preference. | affects: REQ-010, REQ-011, REQ-014
+- DEC-016 | Treat recognized shell controls, wrappers, and remote-content substitutions as executable
+  intent and fail closed when relevant parsing remains ambiguous. | rationale: syntax that preserves
+  fetcher-to-interpreter flow cannot turn into a clean result merely because it is wrapped, redirected,
+  nested, or launched by an unknown command. | affects: REQ-009, REQ-010, REQ-012
 
 ## Open Questions
 

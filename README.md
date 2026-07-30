@@ -135,10 +135,13 @@ The scanner uses Python 3.11 or newer and only the standard library. It reads th
 redacts matched values, and emits text, JSON, or SARIF:
 
 ```bash
-python skill/vibeworthy/scripts/preflight.py /path/to/project
-python skill/vibeworthy/scripts/preflight.py /path/to/project --format json
-python skill/vibeworthy/scripts/preflight.py /path/to/project --format sarif
+python -I skill/vibeworthy/scripts/preflight.py /path/to/project
+python -I skill/vibeworthy/scripts/preflight.py /path/to/project --format json
+python -I skill/vibeworthy/scripts/preflight.py /path/to/project --format sarif
 ```
+
+Keep `-I`: isolated mode prevents project-controlled Python startup and import hooks from running
+before the scanner can inspect the target.
 
 Exit codes are stable:
 
