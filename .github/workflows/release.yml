@@ -47,6 +47,10 @@ jobs:
           export LC_ALL=C
           export TZ=UTC
 
+          # SemVer 2.0.0 forbids leading zeroes in numeric prerelease identifiers,
+          # while build metadata identifiers may contain them.
+          semver_pattern='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.((0|[1-9][0-9]*)|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?'
+
           release_commit="$(git rev-parse --verify 'HEAD^{commit}')"
           if [[ ! "$release_commit" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Release commit did not resolve to a full SHA." >&2
@@ -56,7 +60,7 @@ jobs:
           tag_name=""
           if [[ "$EVENT_NAME" == "push" ]]; then
             tag_name="$GITHUB_REF_NAME"
-            if [[ ! "$tag_name" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            if [[ ! "$tag_name" =~ ^v${semver_pattern}$ ]]; then
               echo "The tag must be a safe SemVer prefixed with v." >&2
               exit 1
             fi
@@ -87,7 +91,7 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+          if [[ ! "$version" =~ ^${semver_pattern}$ ]]; then
             echo "Version must be a safe SemVer without a leading v." >&2
             exit 1
           fi

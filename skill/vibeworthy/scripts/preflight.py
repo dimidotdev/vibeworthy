@@ -13,12 +13,14 @@ import argparse
 import base64
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
 import queue
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -35,6 +37,10 @@ TOOL_VERSION = "1.0.0"
 SCHEMA_VERSION = "1.0"
 DEFAULT_MAX_FILE_BYTES = 1_048_576
 DEFAULT_MAX_FILES = 20_000
+DEFAULT_MAX_TOTAL_BYTES = 67_108_864
+DEFAULT_MAX_FINDINGS = 50_000
+MAX_PATH_REDACTION_VALUES = 50_000
+MAX_PATH_REDACTION_PATTERN_CHARS = 4_194_304
 MAX_SUPPRESSION_METADATA_CHARS = 4_096
 
 BLOCKER = "blocker"
@@ -378,6 +384,10 @@ class CandidateLimitExceeded(Exception):
     """Candidate enumeration stopped before retaining an unbounded path list."""
 
 
+class FindingLimitExceeded(Exception):
+    """Finding enumeration stopped before a partial report could be trusted."""
+
+
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:  # noqa: ARG002 - intentionally redacted
         raise UsageFailure
@@ -459,6 +469,9 @@ _PRIVATE_KEY_RE = re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----")
 _CLOUD_KEY_RE = re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
 _PROVIDER_TOKEN_RES = (
     re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36,255}(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{22,255}(?![A-Za-z0-9_])"),
+    re.compile(r"(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])"),
+    re.compile(r"(?<![A-Za-z0-9_-])sk-proj-[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])"),
     re.compile(r"(?<![A-Za-z0-9])sk_live_[A-Za-z0-9]{20,255}(?![A-Za-z0-9])"),
     re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{20,255}(?![A-Za-z0-9])"),
 )
@@ -539,6 +552,10 @@ _FIREBASE_ALLOW_RE = re.compile(
 )
 _ACTION_USES_RE = re.compile(
     r"(?:^\s*-?\s*|[{,]\s*)[\"']?uses[\"']?\s*:\s*[\"']?(?P<reference>[^\s,}#\"']+)",
+    re.IGNORECASE,
+)
+_WORKFLOW_IMAGE_RE = re.compile(
+    r"(?:^\s*-?\s*|[{,]\s*)[\"']?(?:container|image)[\"']?\s*:\s*[\"']?(?P<reference>[^\s,}#\"']+)",
     re.IGNORECASE,
 )
 _SUPPRESSION_HINT_RE = re.compile(r"vibeworthy\s*:\s*(?:ignore|suppress)\b", re.IGNORECASE)
@@ -707,6 +724,18 @@ def _assignment_value(line: str, separator: int) -> tuple[str, int, bool]:
         quote_character = line[value_index]
         value_index += 1
     value_start = value_index
+    if quote_character:
+        escaped = False
+        while value_index < len(line):
+            character = line[value_index]
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote_character:
+                return line[value_start:value_index], value_index + 1, True
+            value_index += 1
+        return line[value_start:value_index], value_index, False
     while value_index < len(line) and line[value_index] in _ASSIGNMENT_VALUE_CHARS:
         value_index += 1
     value = line[value_start:value_index]
@@ -717,7 +746,9 @@ def _assignment_value(line: str, separator: int) -> tuple[str, int, bool]:
     return value, next_index, quote_closed
 
 
-def _generic_assignments_core(line: str) -> Iterable[tuple[str, str]]:
+def _generic_assignments_core(
+    line: str, *, code_context: bool = False
+) -> Iterable[tuple[str, str]]:
     """Yield credential-like assignments without backtracking over untrusted text."""
 
     name_start: int | None = None
@@ -755,10 +786,33 @@ def _generic_assignments_core(line: str) -> Iterable[tuple[str, str]]:
         for separator in separators:
             value, value_end, quote_closed = _assignment_value(line, separator)
             next_index = max(next_index, value_end)
+            literal_start = separator + 1
+            while literal_start < len(line) and line[literal_start].isspace():
+                literal_start += 1
+            quoted = literal_start < len(line) and line[literal_start] in {'"', "'"}
+            following = value_end
+            while following < len(line) and line[following].isspace():
+                following += 1
+            looks_like_call = not quoted and following < len(line) and line[following] == "("
+            direct_colon = character == ":" and separator == index
+            bare_identifier = re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", value) is not None
+            declaration_prefix = line[max(0, (name_start or 0) - 512) : name_start or 0].lower()
+            looks_like_type = (
+                code_context
+                and
+                not quoted
+                and value.replace("_", "").isalnum()
+                and not any(character.isdigit() for character in value)
+                and re.search(r"\b(?:interface|type|function|class|declare)\b", declaration_prefix) is not None
+            )
             if (
                 _is_secret_assignment_name(name)
                 and 12 <= len(value) <= 4_096
                 and quote_closed
+                and not looks_like_call
+                and not looks_like_type
+                and not (code_context and not quoted and direct_colon and bare_identifier)
+                and not (code_context and not quoted and bare_identifier)
             ):
                 yield name, value
 
@@ -768,15 +822,89 @@ def _generic_assignments_core(line: str) -> Iterable[tuple[str, str]]:
         whitespace_after_name = False
 
 
-def _generic_assignments(line: str) -> Iterable[tuple[str, str]]:
+def _generic_assignments(
+    line: str, *, code_context: bool = False
+) -> Iterable[tuple[str, str]]:
     seen: set[tuple[str, str]] = set()
     normalized = _normalized_assignment_line(line)
     for candidate_line in (line,) if normalized == line else (line, normalized):
-        for name, value in _generic_assignments_core(candidate_line):
+        for name, value in _generic_assignments_core(
+            candidate_line, code_context=code_context
+        ):
             key = (_normalized_assignment_name(name), value)
             if key not in seen:
                 seen.add(key)
                 yield name, value
+
+
+def _backtick_assignments(text: str) -> Iterable[tuple[int, str]]:
+    """Yield non-interpolated credential literals, including bounded multiline ones."""
+
+    index = 0
+    line_number = 1
+    while index < len(text):
+        opening = text.find("`", index)
+        if opening < 0:
+            return
+        line_number += text.count("\n", index, opening)
+        left_boundary = max(text.rfind("\n", max(0, opening - 768), opening), text.rfind(";", max(0, opening - 768), opening))
+        prefix = text[left_boundary + 1 : opening]
+        separator = prefix.rfind("=")
+        if separator < 0:
+            separator = prefix.rfind(":")
+        name_match = re.search(
+            r"([A-Za-z_$][A-Za-z0-9_$.'\"-]{0,255})\s*(?::[^=]{0,512})?=\s*$",
+            prefix,
+        )
+        if name_match is None and separator >= 0:
+            name_match = re.search(
+                r"([A-Za-z_$][A-Za-z0-9_$.'\"-]{0,255})\s*[:=]\s*$",
+                prefix,
+            )
+        cursor = opening + 1
+        escaped = False
+        while cursor < len(text):
+            character = text[cursor]
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == "`":
+                break
+            cursor += 1
+        if cursor >= len(text):
+            return
+        value = text[opening + 1 : cursor]
+        if (
+            name_match is not None
+            and _is_secret_assignment_name(name_match.group(1))
+            and "${" not in value
+            and 12 <= len(value) <= 4_096
+            and not _placeholder(value)
+        ):
+            yield line_number, value
+        line_number += text.count("\n", opening, cursor)
+        index = cursor + 1
+
+
+def _detected_assignment_values(
+    text: str, *, code_context: bool = False
+) -> set[str]:
+    values: set[str] = set()
+    for line in text.splitlines():
+        for match in _PUBLIC_CLIENT_CREDENTIAL_RE.finditer(line):
+            value = match.group("value")
+            if not _placeholder(value):
+                values.add(value)
+        for match in _SERVICE_ROLE_ASSIGNMENT_RE.finditer(line):
+            value = match.group("value")
+            if not _placeholder(value):
+                values.add(value)
+        for _name, value in _generic_assignments(line, code_context=code_context):
+            if not _placeholder(value):
+                values.add(value)
+    values.update(value for _line, value in _backtick_assignments(text))
+    return values
 
 
 def _secret_assignment_separator(value: str) -> int | None:
@@ -888,6 +1016,73 @@ def _disambiguate_display_paths(candidates: Sequence[Candidate]) -> list[Candida
     return sorted(result, key=lambda candidate: candidate.display_path)
 
 
+def _redact_content_values_from_paths(
+    candidates: Sequence[Candidate], values: Iterable[str]
+) -> list[Candidate]:
+    """Redact all detected assignment values from report paths in linear time."""
+
+    transitions: list[dict[str, int]] = [{}]
+    failures = [0]
+    longest = [0]
+    for raw_value in values:
+        value = _safe_display_component(raw_value)
+        if not value or value == "." or "[REDACTED]" in value:
+            continue
+        state = 0
+        for character in value:
+            next_state = transitions[state].get(character)
+            if next_state is None:
+                next_state = len(transitions)
+                transitions[state][character] = next_state
+                transitions.append({})
+                failures.append(0)
+                longest.append(0)
+            state = next_state
+        longest[state] = max(longest[state], len(value))
+
+    pending: queue.SimpleQueue[int] = queue.SimpleQueue()
+    for state in transitions[0].values():
+        pending.put(state)
+    while not pending.empty():
+        state = pending.get()
+        longest[state] = max(longest[state], longest[failures[state]])
+        for character, child in transitions[state].items():
+            fallback = failures[state]
+            while fallback and character not in transitions[fallback]:
+                fallback = failures[fallback]
+            failures[child] = transitions[fallback].get(character, 0)
+            pending.put(child)
+
+    redacted: list[Candidate] = []
+    for candidate in candidates:
+        intervals: list[tuple[int, int]] = []
+        state = 0
+        for index, character in enumerate(candidate.display_path):
+            while state and character not in transitions[state]:
+                state = failures[state]
+            state = transitions[state].get(character, 0)
+            match_length = longest[state]
+            if match_length:
+                intervals.append((index + 1 - match_length, index + 1))
+        if not intervals:
+            redacted.append(candidate)
+            continue
+        merged: list[tuple[int, int]] = []
+        for start, end in intervals:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+            else:
+                merged.append((start, end))
+        parts: list[str] = []
+        cursor = 0
+        for start, end in merged:
+            parts.extend((candidate.display_path[cursor:start], "[REDACTED]"))
+            cursor = end
+        parts.append(candidate.display_path[cursor:])
+        redacted.append(dataclasses.replace(candidate, display_path="".join(parts)))
+    return _disambiguate_display_paths(redacted)
+
+
 def _is_env_template(name: str) -> bool:
     lower = name.lower()
     template_parts = (".example", ".sample", ".template", ".dist", ".defaults")
@@ -924,9 +1119,45 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
-def _git_command(arguments: Sequence[str]) -> list[str]:
+def _resolve_git_executable(cwd: Path) -> str:
+    """Resolve Git without trusting relative or worktree-controlled PATH entries."""
+
+    try:
+        resolved_cwd = cwd.resolve(strict=True)
+    except OSError as exc:
+        raise GitUnavailable from exc
+    path_value = os.environ.get("PATH", "")
+    for entry in path_value.split(os.pathsep):
+        if not entry:
+            continue
+        entry_path = Path(entry)
+        if not entry_path.is_absolute():
+            continue
+        candidate = shutil.which("git", path=os.fspath(entry_path))
+        if candidate is None:
+            continue
+        candidate_path = Path(candidate)
+        if not candidate_path.is_absolute():
+            continue
+        try:
+            resolved_candidate = candidate_path.resolve(strict=True)
+            candidate_stat = resolved_candidate.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(candidate_stat.st_mode):
+            continue
+        candidate_parent = resolved_candidate.parent
+        if _contains_path(resolved_cwd, resolved_candidate) or _contains_path(
+            candidate_parent, resolved_cwd
+        ):
+            continue
+        return os.fspath(resolved_candidate)
+    raise GitUnavailable
+
+
+def _git_command(executable: str, arguments: Sequence[str]) -> list[str]:
     return [
-        "git",
+        executable,
         "-c",
         "core.quotepath=false",
         "-c",
@@ -938,9 +1169,10 @@ def _git_command(arguments: Sequence[str]) -> list[str]:
 
 
 def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
+    executable = _resolve_git_executable(cwd)
     try:
         completed = subprocess.run(
-            _git_command(arguments),
+            _git_command(executable, arguments),
             cwd=os.fspath(cwd),
             env=_git_environment(),
             stdin=subprocess.DEVNULL,
@@ -959,9 +1191,10 @@ def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
 def _run_git_paths(cwd: Path, arguments: Sequence[str], max_paths: int) -> tuple[int, list[bytes]]:
     """Read NUL-delimited Git paths with bounded buffering and an early count limit."""
 
+    executable = _resolve_git_executable(cwd)
     try:
         process = subprocess.Popen(
-            _git_command(arguments),
+            _git_command(executable, arguments),
             cwd=os.fspath(cwd),
             env=_git_environment(),
             stdin=subprocess.DEVNULL,
@@ -1255,7 +1488,25 @@ def _has_symlink_component(path: Path, allowed_root: Path) -> bool:
     return False
 
 
-def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, max_bytes: int, report: Report) -> str | None:
+def _file_snapshot(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_candidate(
+    candidate: Candidate,
+    scan_root: Path,
+    root_is_file: bool,
+    max_bytes: int,
+    report: Report,
+    *,
+    count_scan: bool = True,
+) -> str | None:
     skip_reason = _skip_path_reason(candidate.scope_path or candidate.display_path)
     if skip_reason:
         report.skipped[skip_reason] += 1
@@ -1303,7 +1554,7 @@ def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, m
             if not stat.S_ISREG(opened_stat.st_mode):
                 report.skipped["special-file"] += 1
                 return None
-            if not os.path.samestat(file_stat, opened_stat):
+            if _file_snapshot(file_stat) != _file_snapshot(opened_stat):
                 report.tool_errors.append(
                     ToolIssue(
                         "tool.file-race",
@@ -1321,15 +1572,51 @@ def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, m
                 chunks.append(chunk)
                 remaining -= len(chunk)
             content = b"".join(chunks)
+            final_opened_stat = os.fstat(descriptor)
         finally:
             os.close(descriptor)
     except OSError:
         report.tool_errors.append(ToolIssue("tool.file-read", "A candidate file could not be read safely.", candidate.display_path))
         return None
+    try:
+        final_path_stat = os.lstat(candidate.path)
+        final_resolved = candidate.path.resolve(strict=True)
+    except OSError:
+        report.tool_errors.append(
+            ToolIssue(
+                "tool.file-race",
+                "A candidate changed while it was being read; no content was scanned.",
+                candidate.display_path,
+            )
+        )
+        return None
+    if (
+        _file_snapshot(opened_stat) != _file_snapshot(final_opened_stat)
+        or _file_snapshot(final_opened_stat) != _file_snapshot(final_path_stat)
+        or final_resolved != resolved
+        or _has_symlink_component(candidate.path, allowed_root)
+    ):
+        report.tool_errors.append(
+            ToolIssue(
+                "tool.file-race",
+                "A candidate changed while it was being read; no content was scanned.",
+                candidate.display_path,
+            )
+        )
+        return None
     if len(content) > max_bytes:
         report.skipped["oversized"] += 1
         return None
     if b"\0" in content:
+        if candidate.path.name == "package.json":
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.manifest-binary",
+                    "A package manifest contains NUL bytes and cannot be parsed safely.",
+                    candidate.display_path,
+                )
+            )
+            return None
         report.skipped["binary"] += 1
         return None
     try:
@@ -1337,7 +1624,8 @@ def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, m
     except UnicodeDecodeError:
         report.skipped["binary"] += 1
         return None
-    report.files_scanned += 1
+    if count_scan:
+        report.files_scanned += 1
     return text
 
 
@@ -1346,6 +1634,11 @@ def _placeholder(value: str) -> bool:
     if not lowered:
         return True
     if lowered.startswith(("${", "{{", "<", "process.env")):
+        return True
+    if re.match(
+        r"^(?:https?://)?(?:[^/@\s]+@)?(?:localhost|(?:[^./\s]+\.)*example\.(?:com|org|net)|(?:[^./\s]+\.)*(?:invalid|test))(?:[/:?#]|$)",
+        lowered,
+    ):
         return True
     tokens = [token for token in re.split(r"[^a-z0-9]+", lowered) if token]
     if not tokens:
@@ -1416,12 +1709,23 @@ def _line_for_json_key(lines: Sequence[str], key: str) -> int:
 def _is_firebase_rules_path(display_path: str) -> bool:
     lower = display_path.lower()
     name = Path(lower).name
-    return name in {"firestore.rules", "storage.rules", "database.rules.json", "firebase.rules"} or lower.endswith(".rules")
+    return (
+        name in {"firestore.rules", "storage.rules", "database.rules.json", "firebase.rules"}
+        or bool(re.fullmatch(r"database(?:\.[a-z0-9_-]+)*\.rules\.json", name))
+        or lower.endswith(".rules")
+    )
 
 
 def _is_workflow_path(display_path: str) -> bool:
     lower = display_path.lower()
     return lower.startswith(".github/workflows/") and lower.endswith((".yml", ".yaml"))
+
+
+def _is_code_assignment_path(path: Path) -> bool:
+    return path.suffix.lower() in {
+        ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".kt",
+        ".mjs", ".cjs", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx",
+    }
 
 
 def _action_is_pinned(reference: str) -> bool:
@@ -1435,15 +1739,109 @@ def _action_is_pinned(reference: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{40}", revision))
 
 
+def _container_is_pinned(reference: str) -> bool:
+    return bool(re.search(r"@sha256:[0-9a-f]{64}$", reference, re.IGNORECASE))
+
+
+def _shell_without_comment(line: str) -> str:
+    quote_character: str | None = None
+    escaped = False
+    token_started = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            token_started = True
+            continue
+        if character == "\\" and quote_character != "'":
+            escaped = True
+            token_started = True
+            continue
+        if character in {'"', "'"}:
+            quote_character = None if quote_character == character else (
+                character if quote_character is None else quote_character
+            )
+            token_started = True
+            continue
+        if quote_character is None and character == "#" and not token_started:
+            return line[:index].rstrip()
+        if quote_character is None and (character.isspace() or character in "|;&()"):
+            token_started = False
+        else:
+            token_started = True
+    return line.rstrip()
+
+
+def _contextual_shell_commands(command: str) -> list[str]:
+    stripped = command.strip()
+    yaml_match = re.match(r"^(?:-\s*)?run\s*:\s*(.*)$", stripped, re.IGNORECASE | re.DOTALL)
+    if yaml_match:
+        payload = yaml_match.group(1).strip()
+        if payload in {"|", "|-", "|+", ">", ">-", ">+"}:
+            return []
+        if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in {'"', "'"}:
+            payload = payload[1:-1]
+        return [payload]
+    docker_match = re.match(r"^RUN\s+(.*)$", stripped, re.IGNORECASE | re.DOTALL)
+    if docker_match:
+        payload = docker_match.group(1).strip()
+        if payload.startswith("["):
+            try:
+                arguments = json.loads(payload)
+            except json.JSONDecodeError:
+                return [payload]
+            if isinstance(arguments, list) and all(isinstance(item, str) for item in arguments):
+                return [" ".join(shlex.quote(item) for item in arguments)]
+        return [payload]
+    if stripped and stripped[0] in "@+-" and not stripped.startswith("--"):
+        stripped = stripped.lstrip("@+- ")
+    return [stripped]
+
+
+def _heredoc_spec(command: str) -> tuple[str, bool, bool] | None:
+    contexts = _contextual_shell_commands(command)
+    if not contexts:
+        return None
+    tokens, complete = _tokenize_shell_line(contexts[0])
+    if not complete:
+        return None
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {"<<", "<<-"}:
+            continue
+        delimiter = tokens[index + 1]
+        if not delimiter:
+            return None
+        invocation = _command_invocation(tokens[:index])
+        executes = invocation.executable in {
+            "bash", "csh", "dash", "ksh", "sh", "zsh", "python", "python2",
+            "python3", "node", "perl", "ruby", "php", "powershell", "pwsh",
+        }
+        return delimiter, token == "<<-", executes
+    return None
+
+
 def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
-    """Yield shell-like logical lines without merging independent physical lines."""
+    """Yield executable logical lines, excluding data-only heredoc bodies."""
 
     parts: list[str] = []
     start_line = 1
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    heredoc: tuple[str, bool, bool, int] | None = None
+    heredoc_body: list[str] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        if heredoc is not None:
+            delimiter, strip_tabs, executes, body_start = heredoc
+            comparison = raw_line.lstrip("\t") if strip_tabs else raw_line
+            if comparison == delimiter:
+                if executes and heredoc_body:
+                    for nested_line, nested_command in _logical_shell_commands("\n".join(heredoc_body)):
+                        yield body_start + nested_line - 1, nested_command
+                heredoc = None
+                heredoc_body = []
+            else:
+                heredoc_body.append(raw_line.lstrip("\t") if strip_tabs else raw_line)
+            continue
         if not parts:
             start_line = line_number
-        trimmed = line.rstrip()
+        trimmed = _shell_without_comment(raw_line).rstrip()
         trailing_backslashes = len(trimmed) - len(trimmed.rstrip("\\"))
         backslash_continuation = trailing_backslashes % 2 == 1
         if backslash_continuation:
@@ -1452,9 +1850,19 @@ def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
         pipeline_continuation = trimmed.endswith(("|", "|&", "||"))
         if backslash_continuation or pipeline_continuation:
             continue
-        yield start_line, " ".join(parts)
+        logical = " ".join(parts)
+        yield start_line, logical
+        specification = _heredoc_spec(logical)
+        if specification is not None:
+            delimiter, strip_tabs, executes = specification
+            heredoc = (delimiter, strip_tabs, executes, line_number + 1)
         parts = []
-    if parts:
+    if heredoc is not None:
+        _delimiter, _strip_tabs, executes, body_start = heredoc
+        if executes and heredoc_body:
+            for nested_line, nested_command in _logical_shell_commands("\n".join(heredoc_body)):
+                yield body_start + nested_line - 1, nested_command
+    elif parts:
         yield start_line, " ".join(parts)
 
 
@@ -1473,6 +1881,8 @@ def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvoca
 
     index = 0
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+    while index < len(current_tokens) and current_tokens[index] in {"(", "{"}:
+        index += 1
     while index < len(current_tokens) and assignment.fullmatch(current_tokens[index]):
         index += 1
     sudo_options_with_value = {
@@ -1634,14 +2044,17 @@ def _shell_command_name(tokens: Sequence[str]) -> str | None:
 
 
 def _normalized_executable_name(value: str) -> str:
-    name = value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    name = value.strip("(){}[]").lstrip("@+-").replace("\\", "/").rsplit("/", 1)[-1].lower()
     return name[:-4] if name.endswith(".exe") else name
 
 
 def _pipeline_has_remote_shell(commands: Sequence[Sequence[str]]) -> bool:
     names = [_shell_command_name(command) for command in commands]
     fetchers = {"curl", "wget"}
-    shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
+    shells = {
+        "bash", "csh", "dash", "ksh", "sh", "zsh", "python", "python2",
+        "python3", "node", "perl", "ruby", "php", "powershell", "pwsh",
+    }
     return any(
         name in fetchers and any(later in shells for later in names[index + 1 :])
         for index, name in enumerate(names)
@@ -1675,6 +2088,12 @@ def _tokens_have_remote_pipeline(tokens: Sequence[str]) -> bool:
 
 def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
     shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
+    interpreter_options = {
+        "python": {"-c"}, "python2": {"-c"}, "python3": {"-c"},
+        "node": {"-e", "--eval"}, "perl": {"-e"}, "ruby": {"-e"},
+        "php": {"-r"}, "powershell": {"-c", "-command"},
+        "pwsh": {"-c", "-command"},
+    }
     payloads: list[str] = []
     simple_commands: list[list[str]] = []
     simple_command: list[str] = []
@@ -1709,6 +2128,14 @@ def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
         if executable == "eval":
             if executable_index + 1 < len(invocation_arguments):
                 payloads.append(" ".join(invocation_arguments[executable_index + 1 :]))
+            continue
+
+        if executable in interpreter_options:
+            accepted = interpreter_options[executable]
+            for index in range(executable_index + 1, len(invocation_arguments) - 1):
+                if invocation_arguments[index].lower() in accepted:
+                    payloads.append(invocation_arguments[index + 1])
+                    break
             continue
 
         if executable not in shells:
@@ -1910,6 +2337,15 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
 def _remote_pipeline_status(command: str, depth: int = 0) -> tuple[bool, bool]:
     """Return (detected, unparsed) for a bounded shell-like command string."""
 
+    contexts = _contextual_shell_commands(command)
+    normalized_input = command.strip()
+    if contexts != [normalized_input]:
+        for context in contexts:
+            detected, unparsed = _remote_pipeline_status(context, depth)
+            if detected or unparsed:
+                return detected, unparsed
+        return False, False
+    command = normalized_input
     if "|" not in command or re.search(
         r"\b(?:curl|wget)(?:\.exe)?\b", command, re.IGNORECASE
     ) is None:
@@ -2039,13 +2475,134 @@ def _firebase_quoted_positions(text: str) -> bytearray:
     return quoted
 
 
-def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict[str, object] | None:
+def _firebase_or_true_offsets(text: str) -> Iterable[int]:
+    """Find a literal true operand adjacent to OR with bounded local work."""
+
+    search_from = 0
+    while True:
+        operator = text.find("||", search_from)
+        if operator < 0:
+            return
+        right = operator + 2
+        right_limit = min(len(text), right + 4_096)
+        while right < right_limit and (text[right].isspace() or text[right] == "("):
+            right += 1
+        right_true = text[right : right + 4].lower() == "true" and (
+            right + 4 >= len(text) or not (text[right + 4].isalnum() or text[right + 4] == "_")
+        )
+        left = operator - 1
+        left_limit = max(-1, operator - 4_096)
+        while left > left_limit and (text[left].isspace() or text[left] == ")"):
+            left -= 1
+        left_start = left - 3
+        left_true = left_start >= 0 and text[left_start : left + 1].lower() == "true" and (
+            left_start == 0 or not (text[left_start - 1].isalnum() or text[left_start - 1] == "_")
+        )
+        if right_true:
+            yield right
+        elif left_true:
+            yield left_start
+        search_from = operator + 2
+
+
+def _sql_code_view(text: str) -> str:
+    """Blank SQL comments and literal bodies while preserving offsets and lines."""
+
+    output = list(text)
+    index = 0
+    block_depth = 0
+    while index < len(text):
+        if block_depth:
+            if text.startswith("/*", index):
+                output[index] = output[index + 1] = " "
+                block_depth += 1
+                index += 2
+            elif text.startswith("*/", index):
+                output[index] = output[index + 1] = " "
+                block_depth -= 1
+                index += 2
+            else:
+                if text[index] not in "\r\n":
+                    output[index] = " "
+                index += 1
+            continue
+        if text.startswith("--", index):
+            while index < len(text) and text[index] not in "\r\n":
+                output[index] = " "
+                index += 1
+            continue
+        if text.startswith("/*", index):
+            output[index] = output[index + 1] = " "
+            block_depth = 1
+            index += 2
+            continue
+        character = text[index]
+        if character == "'":
+            output[index] = " "
+            index += 1
+            while index < len(text):
+                if text[index] not in "\r\n":
+                    output[index] = " "
+                if text[index] == "'":
+                    if index + 1 < len(text) and text[index + 1] == "'":
+                        output[index + 1] = " "
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if character == '"':
+            index += 1
+            while index < len(text):
+                if text[index] == '"':
+                    if index + 1 < len(text) and text[index + 1] == '"':
+                        output[index] = output[index + 1] = "x"
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                if text[index] not in "\r\n":
+                    output[index] = "x"
+                index += 1
+            continue
+        if character == "$":
+            delimiter_end = index + 1
+            while delimiter_end < len(text) and (
+                text[delimiter_end].isalnum() or text[delimiter_end] == "_"
+            ):
+                delimiter_end += 1
+            if delimiter_end < len(text) and text[delimiter_end] == "$" and (
+                delimiter_end == index + 1
+                or text[index + 1].isalpha()
+                or text[index + 1] == "_"
+            ):
+                delimiter = text[index : delimiter_end + 1]
+                close = text.find(delimiter, delimiter_end + 1)
+                literal_end = len(text) if close < 0 else close + len(delimiter)
+                for position in range(index, literal_end):
+                    if text[position] not in "\r\n":
+                        output[position] = " "
+                index = literal_end
+                continue
+        index += 1
+    return "".join(output)
+
+
+def _scan_text(
+    candidate: Candidate,
+    text: str,
+    findings: list[Finding],
+    max_findings: int = DEFAULT_MAX_FINDINGS,
+) -> dict[str, object] | None:
     lines = text.splitlines()
     seen: set[tuple[str, int]] = set()
 
     def add(rule_id: str, line_number: int) -> None:
         key = (rule_id, line_number)
         if key not in seen:
+            if len(findings) >= max_findings:
+                raise FindingLimitExceeded
             findings.append(
                 Finding(
                     rule_id,
@@ -2096,13 +2653,18 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
         if service_role_match and not _placeholder(service_role_match.group("value")):
             add("VW-SUPABASE-PRIVILEGED-KEY", line_number)
 
-        for _name, value in _generic_assignments(line):
+        for _name, value in _generic_assignments(
+            line, code_context=_is_code_assignment_path(candidate.path)
+        ):
             if not _placeholder(value) and not _is_known_specialized_value(value):
                 add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
 
         if workflow_file:
             for action_match in _ACTION_USES_RE.finditer(line):
                 if not _action_is_pinned(action_match.group("reference")):
+                    add("VW-AUTOMATION-UNPINNED", line_number)
+            for image_match in _WORKFLOW_IMAGE_RE.finditer(line):
+                if not _container_is_pinned(image_match.group("reference")):
                     add("VW-AUTOMATION-UNPINNED", line_number)
 
         if re.search(r"[\"']type[\"']\s*:\s*[\"']service_account[\"']", line):
@@ -2114,6 +2676,10 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
 
     if service_account_type_line is not None and service_account_private_line is not None:
         add("VW-FIREBASE-SERVICE-ACCOUNT", service_account_private_line)
+
+    for line_number, value in _backtick_assignments(text):
+        if not _is_known_specialized_value(value):
+            add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
 
     remote_lines, unparsed_shell_lines = _remote_pipe_line_numbers(text)
     for line_number in remote_lines:
@@ -2151,12 +2717,32 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
                     else 1
                 )
                 add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
+        for start in _firebase_or_true_offsets(normalized_rules):
+            statement_boundary = max(
+                normalized_rules.rfind(";", max(0, start - 4_096), start),
+                normalized_rules.rfind("{", max(0, start - 4_096), start),
+            )
+            statement_prefix = normalized_rules[statement_boundary + 1 : start].lower()
+            rtd_boundary = max(
+                statement_boundary,
+                normalized_rules.rfind(",", max(0, start - 4_096), start),
+            )
+            rtd_prefix = normalized_rules[rtd_boundary + 1 : start].lower()
+            is_allow_condition = "allow " in statement_prefix and ": if " in statement_prefix
+            is_rtd_condition = any(key in rtd_prefix for key in (".read", ".write")) and ":" in rtd_prefix
+            if not (is_allow_condition or is_rtd_condition):
+                continue
+            if quoted_positions[start] and not is_rtd_condition:
+                continue
+            line_number = normalized_line_numbers[start] if start < len(normalized_line_numbers) else 1
+            add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
 
     if candidate.path.suffix.lower() == ".sql":
+        sql_code = _sql_code_view(text)
         previous_match_start = 0
         sql_line_number = 1
-        for match in _SUPABASE_RLS_DISABLED_RE.finditer(text):
-            sql_line_number += text.count("\n", previous_match_start, match.start())
+        for match in _SUPABASE_RLS_DISABLED_RE.finditer(sql_code):
+            sql_line_number += sql_code.count("\n", previous_match_start, match.start())
             previous_match_start = match.start()
             add("VW-SUPABASE-RLS-DISABLED", sql_line_number)
 
@@ -2361,6 +2947,15 @@ def _apply_suppressions(findings: list[Finding], sources: dict[bytes, str], toda
     findings.extend(additions)
 
 
+def _hide_incomplete_issue_paths(report: Report) -> None:
+    report.tool_errors = [
+        issue
+        if issue.path == "."
+        else dataclasses.replace(issue, path="__vibeworthy_unavailable_path__")
+        for issue in report.tool_errors
+    ]
+
+
 def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FILE_BYTES, max_files: int = DEFAULT_MAX_FILES) -> Report:
     report = Report()
     if max_files <= 0:
@@ -2384,19 +2979,126 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         report.tool_errors.append(ToolIssue("tool.file-limit", "The candidate-file limit was exceeded; no partial clean result was produced."))
         return report
 
-    sources: dict[bytes, str] = {}
-    manifests: list[dict[str, object]] = []
+    content_hashes: dict[bytes, bytes] = {}
+    path_values: set[str] = set()
+    path_value_characters = 0
+    aggregate_bytes = 0
+    readable_source_ids: set[bytes] = set()
     for candidate in candidates:
-        text = _read_candidate(candidate, scan_root, root_is_file, max_file_bytes, report)
+        text = _read_candidate(
+            candidate,
+            scan_root,
+            root_is_file,
+            max_file_bytes,
+            report,
+            count_scan=False,
+        )
         if text is None:
             continue
-        sources[candidate.source_id] = text
-        manifest = _scan_text(candidate, text, report.findings)
+        encoded = text.encode("utf-8")
+        aggregate_bytes += len(encoded)
+        if aggregate_bytes > DEFAULT_MAX_TOTAL_BYTES:
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.byte-limit",
+                    "The aggregate input-byte limit was exceeded; no partial clean result was produced.",
+                )
+            )
+            _hide_incomplete_issue_paths(report)
+            return report
+        readable_source_ids.add(candidate.source_id)
+        content_hashes[candidate.source_id] = hashlib.sha256(encoded).digest()
+        detected_values = _detected_assignment_values(
+            text, code_context=_is_code_assignment_path(candidate.path)
+        )
+        new_values = detected_values.difference(path_values)
+        path_values.update(new_values)
+        path_value_characters += sum(len(value) for value in new_values)
+        if (
+            len(path_values) > MAX_PATH_REDACTION_VALUES
+            or path_value_characters > MAX_PATH_REDACTION_PATTERN_CHARS
+        ):
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.path-redaction-limit",
+                    "Path redaction exceeded its bounded value budget; no report locations were emitted.",
+                )
+            )
+            _hide_incomplete_issue_paths(report)
+            return report
+    if report.tool_errors:
+        _hide_incomplete_issue_paths(report)
+        return report
+
+    candidates = _redact_content_values_from_paths(candidates, path_values)
+    manifests: list[dict[str, object]] = []
+    for candidate in candidates:
+        if candidate.source_id not in readable_source_ids:
+            continue
+        text = _read_candidate(candidate, scan_root, root_is_file, max_file_bytes, report)
+        if text is None:
+            if not report.tool_errors:
+                report.tool_errors.append(
+                    ToolIssue(
+                        "tool.file-race",
+                        "A candidate became unavailable between scanner passes; no partial result was produced.",
+                        candidate.display_path,
+                    )
+                )
+            break
+        encoded = text.encode("utf-8")
+        if hashlib.sha256(encoded).digest() != content_hashes[candidate.source_id]:
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.file-race",
+                    "A candidate changed between scanner passes; no partial result was produced.",
+                    candidate.display_path,
+                )
+            )
+            break
+        current_findings: list[Finding] = []
+        try:
+            manifest = _scan_text(
+                candidate,
+                text,
+                current_findings,
+                DEFAULT_MAX_FINDINGS - len(report.findings),
+            )
+        except FindingLimitExceeded:
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.finding-limit",
+                    "The finding limit was exceeded; no partial result was produced.",
+                )
+            )
+            break
+        _apply_suppressions(current_findings, {candidate.source_id: text})
+        if len(report.findings) + len(current_findings) > DEFAULT_MAX_FINDINGS:
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.finding-limit",
+                    "The finding limit was exceeded; no partial result was produced.",
+                )
+            )
+            break
+        report.findings.extend(current_findings)
         if manifest is not None:
             manifests.append(manifest)
 
+    if report.tool_errors:
+        report.findings.clear()
+        _hide_incomplete_issue_paths(report)
+        return report
     _add_dependency_findings(candidates, manifests, scan_root, root_is_file, report.findings)
-    _apply_suppressions(report.findings, sources)
+    if len(report.findings) > DEFAULT_MAX_FINDINGS:
+        report.findings.clear()
+        report.tool_errors.append(
+            ToolIssue(
+                "tool.finding-limit",
+                "The finding limit was exceeded; no partial result was produced.",
+            )
+        )
+        return report
     unique: dict[tuple[str, bytes, int], Finding] = {}
     for finding in report.findings:
         key = (finding.rule_id, finding.source_id, finding.line)

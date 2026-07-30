@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -76,55 +77,105 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("git merge-base --is-ancestor", self.workflow)
         self.assertIn("archive inventory differs from the evaluated skill tree", self.workflow)
 
-    def test_archive_command_is_reproducible_and_skill_only(self) -> None:
-        tree = subprocess.run(
-            ["git", "rev-parse", "HEAD:skill/vibeworthy"],
-            cwd=REPOSITORY_ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        epoch = subprocess.run(
-            ["git", "show", "-s", "--format=%ct", "HEAD"],
-            cwd=REPOSITORY_ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        expected = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", tree],
-            cwd=REPOSITORY_ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True,
-        ).stdout.splitlines()
+    def test_version_validation_follows_semver_2_0_0(self) -> None:
+        match = re.search(
+            r"(?m)^          semver_pattern='([^'\n]+)'$",
+            self.workflow,
+        )
+        self.assertIsNotNone(match)
+        pattern = re.compile(match.group(1))
 
+        accepted = (
+            "0.0.0",
+            "1.0.0",
+            "1.0.0-0",
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-0.3.7",
+            "1.0.0-x.7.z.92",
+            "1.0.0-alpha-beta",
+            "1.0.0+001",
+            "1.0.0-alpha+001",
+            "1.0.0-rc.1+build.001",
+        )
+        rejected = (
+            "01.0.0",
+            "1.01.0",
+            "1.0.01",
+            "1.0.0-01",
+            "1.0.0-alpha.01",
+            "1.0.0-",
+            "1.0.0-alpha..1",
+            "1.0.0+",
+            "1.0.0+build..1",
+            "v1.0.0",
+        )
+        for version in accepted:
+            with self.subTest(version=version, expected="accepted"):
+                self.assertIsNotNone(pattern.fullmatch(version))
+        for version in rejected:
+            with self.subTest(version=version, expected="rejected"):
+                self.assertIsNone(pattern.fullmatch(version))
+
+        self.assertIn(
+            'if [[ ! "$tag_name" =~ ^v${semver_pattern}$ ]]',
+            self.workflow,
+        )
+        self.assertIn(
+            'if [[ ! "$version" =~ ^${semver_pattern}$ ]]',
+            self.workflow,
+        )
+
+    def test_archive_command_is_reproducible_and_skill_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            first = Path(temporary) / "first.zip"
-            second = Path(temporary) / "second.zip"
-            for path in (first, second):
-                subprocess.run(
-                    [
-                        "git",
-                        "archive",
-                        "--format=zip",
-                        "-9",
-                        "--prefix=vibeworthy/",
-                        f"--mtime=@{epoch}",
-                        f"--output={path}",
-                        tree,
-                    ],
-                    cwd=REPOSITORY_ROOT,
+            temporary_root = Path(temporary)
+            repository = temporary_root / "repository"
+            source = REPOSITORY_ROOT / "skill" / "vibeworthy"
+            shutil.copytree(
+                source,
+                repository,
+                ignore=shutil.ignore_patterns(
+                    "__pycache__",
+                    "*.py[cod]",
+                    ".DS_Store",
+                    ".idea",
+                    ".vscode",
+                ),
+            )
+            source_inventory = sorted(
+                path.relative_to(repository).as_posix()
+                for path in repository.rglob("*")
+                if path.is_file()
+            )
+
+            def git(*arguments: str) -> str:
+                return subprocess.run(
+                    ["git", *arguments],
+                    cwd=repository,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    text=True,
                     check=True,
+                ).stdout.strip()
+
+            git("init", "--quiet")
+            git("-c", "core.autocrlf=false", "add", "--force", "--", ".")
+            tree = git("write-tree")
+            expected = git("ls-tree", "-r", "--name-only", tree).splitlines()
+            self.assertEqual(source_inventory, expected)
+
+            first = temporary_root / "first.zip"
+            second = temporary_root / "second.zip"
+            for path in (first, second):
+                git(
+                    "archive",
+                    "--format=zip",
+                    "-9",
+                    "--prefix=vibeworthy/",
+                    "--mtime=@1704067200",
+                    f"--output={path}",
+                    tree,
                 )
             self.assertEqual(
                 hashlib.sha256(first.read_bytes()).digest(),
