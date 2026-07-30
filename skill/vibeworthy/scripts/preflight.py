@@ -308,12 +308,22 @@ class Candidate:
     scope_path: str = ""
 
 
+@dataclasses.dataclass(frozen=True)
+class RootGuard:
+    requested: Path
+    resolved: Path
+    identity: tuple[int, int, int]
+    root_is_file: bool
+
+
 @dataclasses.dataclass
 class Scope:
     mode: str = "not-started"
     target: str = "."
     includes: list[str] = dataclasses.field(default_factory=list)
     excludes: list[str] = dataclasses.field(default_factory=list)
+    atomic_snapshot: bool = False
+    release_evidence_requires_quiescent_isolated_checkout: bool = True
     git_history_scanned: bool = False
     submodules_scanned: bool = False
     network_used: bool = False
@@ -571,6 +581,52 @@ def _contains_path(parent: Path, child: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _path_identity(value: os.stat_result) -> tuple[int, int, int]:
+    """Return stable object identity without mutable directory metadata."""
+
+    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode))
+
+
+def _file_snapshot(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _is_path_redirect(value: os.stat_result) -> bool:
+    """Recognize POSIX symlinks and Windows name-surrogate reparse points."""
+
+    if stat.S_ISLNK(value.st_mode):
+        return True
+    if hasattr(value, "st_reparse_tag"):
+        return bool(getattr(value, "st_reparse_tag", 0) & 0x20000000)
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(reparse_attribute and getattr(value, "st_file_attributes", 0) & reparse_attribute)
+
+
+def _resolve_strict(path: Path) -> Path:
+    """Resolve a path through a narrow boundary that race tests can control."""
+
+    return path.resolve(strict=True)
+
+
+def _root_guard_current(guard: RootGuard) -> bool:
+    """Verify established root names still reference the original object."""
+
+    for path in dict.fromkeys((guard.requested, guard.resolved)):
+        try:
+            current = os.lstat(path)
+        except (OSError, ValueError):
+            return False
+        if _is_path_redirect(current) or _path_identity(current) != guard.identity:
+            return False
+    return True
 
 
 def _normalized_assignment_name(value: str) -> str:
@@ -1311,7 +1367,7 @@ def _git_candidates(
     except (OSError, ValueError):
         report.tool_errors.append(ToolIssue("tool.git-root", "The Git worktree root could not be resolved safely."))
         return []
-    target_resolved = target.resolve(strict=True)
+    target_resolved = target
     if not _contains_path(git_root, target_resolved):
         report.tool_errors.append(ToolIssue("tool.scope", "The requested target is outside the resolved Git worktree."))
         return []
@@ -1410,10 +1466,16 @@ def _filesystem_candidates(
             display = _relative_display(directory_path, target, False)
             if directory_name.lower() in _SKIP_DIR_NAMES:
                 report.skipped["generated-or-vendor"] += 1
-            elif directory_path.is_symlink():
-                report.skipped["symlink"] += 1
             else:
-                retained_directories.append(directory_name)
+                try:
+                    directory_stat = os.lstat(directory_path)
+                except OSError as error:
+                    errors.append(error)
+                    continue
+                if _is_path_redirect(directory_stat):
+                    report.skipped["symlink"] += 1
+                else:
+                    retained_directories.append(directory_name)
         directory_names[:] = retained_directories
         for file_name in sorted(file_names):
             path = current_path / file_name
@@ -1445,33 +1507,55 @@ def _enumerate_candidates(
     target: Path,
     max_files: int,
     report: Report,
-) -> tuple[list[Candidate], Path, bool]:
+) -> tuple[list[Candidate], RootGuard | None]:
     try:
         target_stat = os.lstat(target)
     except (OSError, ValueError):
         report.tool_errors.append(ToolIssue("tool.target", "The requested target could not be accessed safely."))
-        return [], target, False
-    if stat.S_ISLNK(target_stat.st_mode):
-        report.tool_errors.append(ToolIssue("tool.target-symlink", "A symlink cannot be used as the scan root."))
-        return [], target, False
+        return [], None
+    if _is_path_redirect(target_stat):
+        report.tool_errors.append(
+            ToolIssue("tool.target-symlink", "A symlink or filesystem redirect cannot be used as the scan root.")
+        )
+        return [], None
     target_is_file = stat.S_ISREG(target_stat.st_mode)
     if not target_is_file and not stat.S_ISDIR(target_stat.st_mode):
         report.tool_errors.append(ToolIssue("tool.target-type", "The scan root must be a regular file or directory."))
-        return [], target, False
+        return [], None
+    identity = _path_identity(target_stat)
     try:
-        resolved = target.resolve(strict=True)
-    except OSError:
+        resolved = _resolve_strict(target)
+        requested_after = os.lstat(target)
+        resolved_stat = os.lstat(resolved)
+    except (OSError, ValueError):
         report.tool_errors.append(ToolIssue("tool.target", "The requested target could not be resolved safely."))
-        return [], target, target_is_file
+        return [], None
+    if (
+        _is_path_redirect(requested_after)
+        or _is_path_redirect(resolved_stat)
+        or _path_identity(requested_after) != identity
+        or _path_identity(resolved_stat) != identity
+    ):
+        report.tool_errors.append(
+            ToolIssue("tool.target-race", "The requested scan root changed while its identity was being established.")
+        )
+        return [], None
+
+    guard = RootGuard(target, resolved, identity, target_is_file)
 
     candidates = _git_candidates(resolved, target_is_file, max_files, report)
     if candidates is None:
         candidates = _filesystem_candidates(resolved, target_is_file, max_files, report)
-    return candidates, resolved, target_is_file
+    if not _root_guard_current(guard):
+        report.tool_errors.append(
+            ToolIssue("tool.target-race", "The requested scan root changed while candidates were being enumerated.")
+        )
+        return [], None
+    return candidates, guard
 
 
 def _has_symlink_component(path: Path, allowed_root: Path) -> bool:
-    """Reject a candidate whose path below the root traverses a symlink."""
+    """Reject a candidate whose path below the root traverses a filesystem redirect."""
 
     try:
         relative = path.relative_to(allowed_root)
@@ -1481,32 +1565,43 @@ def _has_symlink_component(path: Path, allowed_root: Path) -> bool:
     for component in relative.parts[:-1]:
         current = current / component
         try:
-            if stat.S_ISLNK(os.lstat(current).st_mode):
+            if _is_path_redirect(os.lstat(current)):
                 return True
         except OSError:
             return True
     return False
 
 
-def _file_snapshot(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
+def _open_readonly(path: Path) -> int:
+    """Open a candidate without following its final symlink where supported."""
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags)
+
+
+def _descriptor_stat(descriptor: int) -> os.stat_result:
+    """Read descriptor metadata through a narrow, independently testable boundary."""
+
+    return os.fstat(descriptor)
 
 
 def _read_candidate(
     candidate: Candidate,
-    scan_root: Path,
-    root_is_file: bool,
+    root_guard: RootGuard,
     max_bytes: int,
     report: Report,
     *,
     count_scan: bool = True,
 ) -> str | None:
+    if not _root_guard_current(root_guard):
+        report.tool_errors.append(
+            ToolIssue("tool.target-race", "The requested scan root changed while files were being read.")
+        )
+        return None
+    scan_root = root_guard.resolved
+    root_is_file = root_guard.root_is_file
     skip_reason = _skip_path_reason(candidate.scope_path or candidate.display_path)
     if skip_reason:
         report.skipped[skip_reason] += 1
@@ -1519,7 +1614,7 @@ def _read_candidate(
     except OSError:
         report.tool_errors.append(ToolIssue("tool.file-metadata", "A candidate file could not be inspected safely.", candidate.display_path))
         return None
-    if stat.S_ISLNK(file_stat.st_mode):
+    if _is_path_redirect(file_stat):
         report.skipped["symlink"] += 1
         return None
     if stat.S_ISDIR(file_stat.st_mode):
@@ -1544,13 +1639,10 @@ def _read_candidate(
         report.skipped["outside-scope"] += 1
         return None
 
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(candidate.path, flags)
+        descriptor = _open_readonly(candidate.path)
         try:
-            opened_stat = os.fstat(descriptor)
+            opened_stat = _descriptor_stat(descriptor)
             if not stat.S_ISREG(opened_stat.st_mode):
                 report.skipped["special-file"] += 1
                 return None
@@ -1572,7 +1664,7 @@ def _read_candidate(
                 chunks.append(chunk)
                 remaining -= len(chunk)
             content = b"".join(chunks)
-            final_opened_stat = os.fstat(descriptor)
+            final_opened_stat = _descriptor_stat(descriptor)
         finally:
             os.close(descriptor)
     except OSError:
@@ -1602,6 +1694,11 @@ def _read_candidate(
                 "A candidate changed while it was being read; no content was scanned.",
                 candidate.display_path,
             )
+        )
+        return None
+    if not _root_guard_current(root_guard):
+        report.tool_errors.append(
+            ToolIssue("tool.target-race", "The requested scan root changed while files were being read.")
         )
         return None
     if len(content) > max_bytes:
@@ -2971,9 +3068,11 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
     except (TypeError, ValueError):
         report.tool_errors.append(ToolIssue("tool.target", "The requested target is invalid."))
         return report
-    candidates, scan_root, root_is_file = _enumerate_candidates(target, max_files, report)
-    if report.tool_errors:
+    candidates, root_guard = _enumerate_candidates(target, max_files, report)
+    if report.tool_errors or root_guard is None:
         return report
+    scan_root = root_guard.resolved
+    root_is_file = root_guard.root_is_file
     report.files_considered = len(candidates)
     if len(candidates) > max_files:
         report.tool_errors.append(ToolIssue("tool.file-limit", "The candidate-file limit was exceeded; no partial clean result was produced."))
@@ -2987,13 +3086,14 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
     for candidate in candidates:
         text = _read_candidate(
             candidate,
-            scan_root,
-            root_is_file,
+            root_guard,
             max_file_bytes,
             report,
             count_scan=False,
         )
         if text is None:
+            if report.tool_errors:
+                break
             continue
         encoded = text.encode("utf-8")
         aggregate_bytes += len(encoded)
@@ -3035,7 +3135,7 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
     for candidate in candidates:
         if candidate.source_id not in readable_source_ids:
             continue
-        text = _read_candidate(candidate, scan_root, root_is_file, max_file_bytes, report)
+        text = _read_candidate(candidate, root_guard, max_file_bytes, report)
         if text is None:
             if not report.tool_errors:
                 report.tool_errors.append(
@@ -3089,6 +3189,12 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         report.findings.clear()
         _hide_incomplete_issue_paths(report)
         return report
+    if not _root_guard_current(root_guard):
+        report.findings.clear()
+        report.tool_errors.append(
+            ToolIssue("tool.target-race", "The requested scan root changed before scanning completed.")
+        )
+        return report
     _add_dependency_findings(candidates, manifests, scan_root, root_is_file, report.findings)
     if len(report.findings) > DEFAULT_MAX_FINDINGS:
         report.findings.clear()
@@ -3116,6 +3222,7 @@ def render_text(report: Report) -> str:
         "VibeWorthy preflight",
         f"Scope: {report.scope.mode}; includes: {', '.join(report.scope.includes) or 'none'}.",
         "Coverage: current target only; Git history and submodule contents were not scanned.",
+        "Consistency: non-atomic worktree view; run against a quiescent isolated checkout. Concurrent local writers can invalidate evidence.",
         "Safety: network not used; project files not modified; matched values are never reported.",
     ]
     if report.findings:

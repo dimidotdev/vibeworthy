@@ -142,6 +142,12 @@ provenance, or market evidence. It skips generated, vendor, binary, and oversize
 not transmit repository data. Run project-native tests, dedicated history and dependency checks, and
 the manual evidence gates described by the skill.
 
+The scanner reads a non-atomic view of the worktree. It rejects filesystem redirects and fails closed
+when it observes a root or file changing, but it cannot defeat a local process with write access that
+swaps and restores paths entirely between checks. Stop editors, generators, builds, and other writers
+before scanning. For release evidence, use a quiescent isolated checkout on a trusted runner and
+discard the result if anything else could have modified that checkout during the scan.
+
 When Git is available, the scanner disables repository fsmonitor execution and uses Git only to
 enumerate tracked plus untracked, non-ignored files. Without Git it falls back to an explicitly labeled
 filesystem scope; that fallback cannot distinguish tracked, ignored, or historical files.

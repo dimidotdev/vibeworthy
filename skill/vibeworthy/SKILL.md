@@ -147,6 +147,12 @@ Run the project's existing formatter, type checks, tests, build, accessibility c
 
 Inspect the bundled [preflight scanner](scripts/preflight.py), review its help, and run `python scripts/preflight.py <project-root> --format text` locally against the bounded project root. Treat its output as heuristic worktree evidence, not proof about Git history, submodules, dependencies, cloud configuration, or runtime behavior. Keep automated passes, failures, tool errors, and manual checks separate. Never convert a tool error or unperformed manual check into a pass.
 
+Run the scanner only while the target is quiescent. It reads a non-atomic worktree view: it rejects
+redirects and fails closed on changes it observes, but it cannot defeat a local writer that swaps and
+restores paths entirely between checks. For release evidence, scan an isolated checkout on a trusted
+runner with no editor, generator, build, or other concurrent writer; otherwise record the scan as
+invalid rather than clean.
+
 For public release, also require relevant authorization matrices, secret-history review, privacy review, dependency and known-exploited-vulnerability review, transitive SBOM, immutable automation pins, artifact provenance or signature, digest verification, backup/restore evidence, migration recovery, alert ownership, and containment. Record missing evidence as missing.
 
 ## 7. Decide release status

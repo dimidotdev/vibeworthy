@@ -191,7 +191,8 @@ while linking to the full references for manual use.
 - REQ-010 | must | The repository shall include a dependency-free Python preflight that scans locally,
   redacts matched values, detects high-confidence secret/env/client-key and unsafe-rule patterns,
   checks lockfile hygiene, supports text, JSON, and SARIF output, and returns stable documented exit
-  codes without modifying the target project.
+  codes without modifying the target project; every output shall state that the worktree view is
+  non-atomic and release evidence requires a quiescent isolated checkout.
 - REQ-011 | must | The scanner shall be git-aware, skip generated/vendor/binary/oversized content,
   scan tracked plus untracked/non-ignored worktree files without implying Git-history or submodule
   coverage, distinguish tracked sensitive environment files from ignored local files and templates,
@@ -274,7 +275,8 @@ while linking to the full references for manual use.
   provenance/signature, digest, and CI identity/branch-control evidence, and every enumerated failure
   condition produces `NO-GO`.
 - AC-010 | REQ-010 | Given scanner fixtures, when run cross-platform, then output and exit codes are
-  deterministic, schemas parse, and the fixtures remain byte-identical.
+  deterministic, schemas parse, the fixtures remain byte-identical, and text/JSON/SARIF expose the
+  non-atomic snapshot limitation.
 - AC-011 | REQ-011 | Given included and excluded fixtures, when scanned, then only intended findings
   appear. Tracked `.env`, ignored `.env`, `.env.example`, binary, build, vendor, large, restricted
   Firebase client-key, and Supabase publishable-key fixtures prove scope/classification; output states
@@ -434,6 +436,15 @@ while linking to the full references for manual use.
   could weaken canonical activation, decision, state, checkout,
   callback, MCP, and child-location requirements. The templates and directly linked references were
   aligned before generating another forward-test candidate.
+- AUDIT-HIST-004 | failed | The 2026-07-30 scanner adversarial review rejected candidate `cf2e5d8`
+  for redaction, parser, budget, pipeline, release, and filesystem-boundary gaps. Candidate `c0fad57`
+  closed those findings, but cross-platform CI exposed noncanonical race fixtures and the follow-up
+  root-boundary review found a scan-root establishment race plus unhandled Windows junctions. Both
+  candidates remain excluded from release scoring; the next exact candidate requires fresh review.
+- AUDIT-HIST-005 | failed | A second 2026-07-30 root-boundary review rejected the claim that intermittent
+  path identity checks close every TOCTOU window: a hostile local writer can swap and restore a tree
+  entirely between samples. DEC-012 narrows the portable scanner's assurance boundary, makes the
+  non-atomic view machine-visible, and requires a quiescent isolated checkout for release evidence.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -550,6 +561,12 @@ while linking to the full references for manual use.
   can be force-moved; the reviewed commit SHA or verified package digest is the durable identity, and
   branch-only platform imports must record the SHA inspected at import time. | affects: REQ-014,
   REQ-015, REQ-016
+- DEC-012 | Treat a hostile concurrent local writer as outside the portable scanner's assurance
+  boundary. | rationale: path identity checks detect observed changes, redirects, and persistent
+  swaps, but a dependency-free Python 3.11 implementation cannot provide one atomic filesystem
+  snapshot across Linux, macOS, and Windows. Release scans therefore require a quiescent isolated
+  checkout on a trusted runner, and every structured format exposes `atomic_snapshot: false` plus
+  `release_evidence_requires_quiescent_isolated_checkout: true`. | affects: REQ-010, REQ-011, REQ-013
 
 ## Open Questions
 

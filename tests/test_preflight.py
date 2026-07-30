@@ -30,6 +30,16 @@ def load_scanner_module() -> types.ModuleType:
     return module
 
 
+def make_root_guard(scanner: types.ModuleType, root: Path, *, root_is_file: bool = False) -> object:
+    resolved = root.resolve(strict=True)
+    return scanner.RootGuard(
+        resolved,
+        resolved,
+        scanner._path_identity(scanner.os.lstat(resolved)),
+        root_is_file,
+    )
+
+
 def synthetic_cloud_key() -> str:
     return ("AK" + "IA") + ("Q" * 16)
 
@@ -157,11 +167,14 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual("none", report["release_assertion"])
         self.assertFalse(report["scope"]["git_history_scanned"])
         self.assertFalse(report["scope"]["submodules_scanned"])
+        self.assertFalse(report["scope"]["atomic_snapshot"])
+        self.assertTrue(report["scope"]["release_evidence_requires_quiescent_isolated_checkout"])
         self.assertFalse(report["scope"]["network_used"])
         self.assertFalse(report["scope"]["files_modified"])
 
         self.assertEqual(0, text.returncode)
         self.assertIn("Git history and submodule contents were not scanned", text.stdout)
+        self.assertIn("non-atomic worktree view", text.stdout)
         self.assertIn("it is not GO", text.stdout)
         self.assertEqual("", text.stderr)
 
@@ -169,6 +182,14 @@ class PreflightTests(unittest.TestCase):
         sarif_document = json.loads(sarif.stdout)
         self.assertEqual("2.1.0", sarif_document["version"])
         self.assertEqual(0, sarif_document["runs"][0]["invocations"][0]["exitCode"])
+        self.assertFalse(
+            sarif_document["runs"][0]["invocations"][0]["properties"]["scope"]["atomic_snapshot"]
+        )
+        self.assertTrue(
+            sarif_document["runs"][0]["invocations"][0]["properties"]["scope"][
+                "release_evidence_requires_quiescent_isolated_checkout"
+            ]
+        )
         self.assertEqual(before, tree_digest(fixture.root))
 
     def test_req_007_matched_secret_is_redacted_in_every_format(self) -> None:
@@ -1258,41 +1279,144 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual("filesystem", report["scope"]["mode"])
                 self.assertFalse(marker.exists())
 
-    def test_req_011_ancestor_symlink_swap_fails_closed_before_read(self) -> None:
+    def test_req_011_opened_descriptor_identity_change_fails_closed(self) -> None:
         scanner = load_scanner_module()
         fixture = RepositoryFixture(self, git=False)
-        candidate_path = fixture.write("safe/data.txt", "ordinary inside content\n")
-        outside_directory = fixture.base / "outside"
-        outside_directory.mkdir()
+        scan_root = fixture.root.resolve(strict=True)
+        candidate_path = fixture.write("data.txt", "ordinary inside content\n").resolve(strict=True)
         outside_value = "outside-" + synthetic_cloud_key()
-        (outside_directory / "data.txt").write_text(outside_value, encoding="utf-8")
-        original_open = scanner.os.open
-        swapped = False
+        outside_path = fixture.base / "outside.txt"
+        outside_path.write_text(outside_value, encoding="utf-8")
+        outside_path = outside_path.resolve(strict=True)
+        original_open = scanner._open_readonly
 
-        def swapping_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
-            nonlocal swapped
-            if not swapped and Path(path) == candidate_path:
-                swapped = True
-                safe_directory = fixture.root / "safe"
-                safe_directory.rename(fixture.root / "safe-original")
-                safe_directory.symlink_to(outside_directory, target_is_directory=True)
-            return original_open(path, flags, *args, **kwargs)
+        def redirected_open(path: Path) -> int:
+            self.assertEqual(candidate_path, Path(path))
+            return original_open(outside_path)
 
         report = scanner.Report()
-        candidate = scanner.Candidate(candidate_path, "safe/data.txt", None)
-        with mock.patch.object(scanner.os, "open", side_effect=swapping_open):
-            result = scanner._read_candidate(candidate, fixture.root, False, 1024, report)
+        candidate = scanner.Candidate(candidate_path, "data.txt", None)
+        root_guard = make_root_guard(scanner, scan_root)
+        with mock.patch.object(scanner, "_open_readonly", side_effect=redirected_open):
+            result = scanner._read_candidate(candidate, root_guard, 1024, report)
 
         self.assertIsNone(result)
         self.assertEqual("tool.file-race", report.tool_errors[0].code)
+        self.assertEqual(2, report.exit_code)
+        rendered = scanner.render_json(report)
+        self.assertNotIn(outside_value, rendered)
+
+    def test_req_011_scan_root_object_swap_fails_closed_before_enumeration(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        fixture.write("inside.txt", "ordinary inside content\n")
+        outside_directory = fixture.base / "outside"
+        outside_directory.mkdir()
+        outside_value = "outside-" + synthetic_cloud_key()
+        (outside_directory / "outside.txt").write_text(outside_value, encoding="utf-8")
+        original_directory = fixture.base / "original"
+        original_resolve = scanner._resolve_strict
+        swapped = False
+
+        def swapping_resolve(path: Path) -> Path:
+            nonlocal swapped
+            if not swapped and Path(path) == fixture.root:
+                swapped = True
+                fixture.root.rename(original_directory)
+                outside_directory.rename(fixture.root)
+            return original_resolve(path)
+
+        report = scanner.Report()
+        with mock.patch.object(scanner, "_resolve_strict", side_effect=swapping_resolve):
+            candidates, root_guard = scanner._enumerate_candidates(fixture.root, 100, report)
+
+        self.assertTrue(swapped)
+        self.assertEqual([], candidates)
+        self.assertIsNone(root_guard)
+        self.assertEqual("tool.target-race", report.tool_errors[0].code)
+        self.assertEqual(2, report.exit_code)
+        self.assertNotIn(outside_value, scanner.render_json(report))
+
+    def test_req_011_resolved_root_identity_mismatch_fails_closed(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        fixture.write("inside.txt", "ordinary inside content\n")
+        outside_directory = fixture.base / "outside"
+        outside_directory.mkdir()
+        outside_value = "outside-" + synthetic_cloud_key()
+        (outside_directory / "outside.txt").write_text(outside_value, encoding="utf-8")
+
+        report = scanner.Report()
+        with mock.patch.object(
+            scanner,
+            "_resolve_strict",
+            return_value=outside_directory.resolve(strict=True),
+        ):
+            candidates, root_guard = scanner._enumerate_candidates(fixture.root, 100, report)
+
+        self.assertEqual([], candidates)
+        self.assertIsNone(root_guard)
+        self.assertEqual("tool.target-race", report.tool_errors[0].code)
+        self.assertEqual(2, report.exit_code)
+        self.assertNotIn(outside_value, scanner.render_json(report))
+
+    def test_req_011_windows_name_surrogate_reparse_is_a_redirect(self) -> None:
+        scanner = load_scanner_module()
+        junction = types.SimpleNamespace(
+            st_mode=scanner.stat.S_IFDIR,
+            st_reparse_tag=0xA0000003,
+        )
+        fallback = types.SimpleNamespace(
+            st_mode=scanner.stat.S_IFDIR,
+            st_file_attributes=scanner.stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+        regular = types.SimpleNamespace(st_mode=scanner.stat.S_IFDIR, st_reparse_tag=0)
+
+        self.assertTrue(scanner._is_path_redirect(junction))
+        self.assertTrue(scanner._is_path_redirect(fallback))
+        self.assertFalse(scanner._is_path_redirect(regular))
+
+    def test_req_011_ancestor_symlink_swap_fails_closed_before_read(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        scan_root = fixture.root.resolve(strict=True)
+        candidate_path = fixture.write("safe/data.txt", "ordinary inside content\n").resolve(strict=True)
+        outside_directory = fixture.base / "outside"
+        outside_directory.mkdir()
+        outside_directory = outside_directory.resolve(strict=True)
+        outside_value = "outside-" + synthetic_cloud_key()
+        (outside_directory / "data.txt").write_text(outside_value, encoding="utf-8")
+        original_open = scanner._open_readonly
+        swapped = False
+
+        def swapping_open(path: Path) -> int:
+            nonlocal swapped
+            if not swapped and Path(path) == candidate_path:
+                swapped = True
+                safe_directory = scan_root / "safe"
+                safe_directory.rename(scan_root / "safe-original")
+                safe_directory.symlink_to(outside_directory, target_is_directory=True)
+            return original_open(path)
+
+        report = scanner.Report()
+        candidate = scanner.Candidate(candidate_path, "safe/data.txt", None)
+        root_guard = make_root_guard(scanner, scan_root)
+        with mock.patch.object(scanner, "_open_readonly", side_effect=swapping_open):
+            result = scanner._read_candidate(candidate, root_guard, 1024, report)
+
+        self.assertIsNone(result)
+        self.assertTrue(swapped)
+        self.assertEqual("tool.file-race", report.tool_errors[0].code)
+        self.assertEqual(2, report.exit_code)
         rendered = scanner.render_json(report)
         self.assertNotIn(outside_value, rendered)
 
     def test_req_011_content_metadata_change_during_read_fails_closed(self) -> None:
         scanner = load_scanner_module()
         fixture = RepositoryFixture(self, git=False)
-        candidate_path = fixture.write("data.txt", "ordinary content\n")
-        original_fstat = scanner.os.fstat
+        scan_root = fixture.root.resolve(strict=True)
+        candidate_path = fixture.write("data.txt", "ordinary content\n").resolve(strict=True)
+        original_fstat = scanner._descriptor_stat
         calls = 0
 
         def changing_fstat(descriptor: int) -> object:
@@ -1312,11 +1436,14 @@ class PreflightTests(unittest.TestCase):
 
         report = scanner.Report()
         candidate = scanner.Candidate(candidate_path, "data.txt", None)
-        with mock.patch.object(scanner.os, "fstat", side_effect=changing_fstat):
-            result = scanner._read_candidate(candidate, fixture.root, False, 1024, report)
+        root_guard = make_root_guard(scanner, scan_root)
+        with mock.patch.object(scanner, "_descriptor_stat", side_effect=changing_fstat):
+            result = scanner._read_candidate(candidate, root_guard, 1024, report)
 
         self.assertIsNone(result)
+        self.assertEqual(2, calls)
         self.assertEqual("tool.file-race", report.tool_errors[0].code)
+        self.assertEqual(2, report.exit_code)
 
     def test_req_011_complete_distinct_approver_warning_suppression(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1538,6 +1665,44 @@ class PreflightTests(unittest.TestCase):
         report = self.json_report(completed)
         self.assertEqual(2, completed.returncode)
         self.assertEqual("tool.target-symlink", report["tool_errors"][0]["code"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_req_011_windows_junction_roots_and_components_are_rejected(self) -> None:
+        fixture = RepositoryFixture(self, git=False)
+        fixture.write("README.md", "ordinary\n")
+        outside_directory = fixture.base / "outside"
+        outside_directory.mkdir()
+        (outside_directory / "secret.txt").write_text(
+            "access_token = \"" + synthetic_cloud_key() + "\"\n",
+            encoding="utf-8",
+        )
+
+        component_junction = fixture.root / "linked"
+        root_junction = fixture.base / "root-junction"
+        for junction, target in (
+            (component_junction, outside_directory),
+            (root_junction, fixture.root),
+        ):
+            created = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, created.returncode, created.stderr)
+
+        component_scan = self.run_scanner(fixture.root)
+        component_report = self.json_report(component_scan)
+        self.assertEqual(0, component_scan.returncode)
+        self.assertEqual(1, component_report["summary"]["skipped_by_reason"]["symlink"])
+        self.assertEqual([], component_report["findings"])
+
+        root_scan = self.run_scanner(root_junction)
+        root_report = self.json_report(root_scan)
+        self.assertEqual(2, root_scan.returncode)
+        self.assertEqual("tool.target-symlink", root_report["tool_errors"][0]["code"])
 
     def test_req_010_non_git_directory_has_honest_filesystem_scope(self) -> None:
         fixture = RepositoryFixture(self, git=False)
