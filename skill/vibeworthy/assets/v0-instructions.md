@@ -28,15 +28,32 @@ Default to synthetic and minimized data. Do not request, print, commit, transmit
 
 Review MCP publisher, permissions, data access, write/destructive methods, and egress; disable unused capabilities. Require explicit human approval immediately before production access, deploy, external communication, billing, destructive commands, or durable external writes.
 
+A future test plan is not permission. Put an explicit approval gate before any planned network request,
+hosted checkout, provider sandbox, email, billing, deployment, or external-service interaction.
+
 ## Establish worth before breadth
 
-Record the target user and triggering moment, costly job, current alternative, evidence versus assumptions, value promise, first reachable distribution path, activation behavior, smallest valuable experiment or slice, observable success signal, and stop condition. Label proposed thresholds. Do not turn sign-up or a click into activation unless it demonstrates received value.
+Record the target user and triggering moment, costly job, current alternative, evidence versus
+assumptions, value promise, first reachable cohort, channel owner, access mechanism, handoff/message,
+distribution friction, activation actor/action/object/precondition/time window, smallest valuable
+experiment or slice, proposed success threshold with rationale, and stop condition. Use `unknown`
+rather than omitting a field. Do not turn sign-up or a click into activation unless it demonstrates
+received value.
 
-Inspect the actual project before material edits. Record the build contract and non-goals. For each consequential or hard-to-reverse decision, compare at least two viable options and choose using repository evidence, risk, maintenance, accessibility, cost, and reversibility.
+Inspect the actual project before material edits. Record the build contract, every explicit non-goal,
+package-manager/lockfile convention, and unrelated changes to preserve. For each consequential or
+hard-to-reverse decision, compare at least two viable options across user value, security/privacy risk,
+maintenance, accessibility, cost, portability, and reversibility. Name the accepted cost and revisit
+trigger.
 
 Implement thin vertical slices with one user-visible behavior, enforcement boundary, negative or failure case, verification seam, and recovery path. Verify each slice before widening scope.
 
-For UI work, prove semantics, accessible names, keyboard and focus completion, reflow at 320 CSS pixels, loading/empty/error/recovery states, content extremes, clear validation, honest consent/pricing/cancellation, and performance at the activation moment. Avoid deceptive urgency, hidden cost, obstructed cancellation, and preselected consent.
+For UI work, disposition as tested, unresolved, or not applicable: loading, empty, error/recovery,
+duplicate or stale action, timeout/retry, keyboard and focus restoration, 320 CSS-pixel reflow, long
+and translated content, and performance at the exact activation or commitment boundary. Require
+honest consent, pricing, and renewal disclosure. Subscription cancellation must have an accessible
+self-service path; email may be additional, never the only route. Avoid deceptive urgency, hidden
+cost, obstructed cancellation, and preselected consent.
 
 ## Establish trust at each changed boundary
 
@@ -65,5 +82,8 @@ Return exactly one recommendation when release is in scope:
 - `NO-GO`: use for unresolved secrets, authorization, destructive data, payments, privacy/legal review, critical or known-exploited dependency, missing/incomplete SBOM, mutable release automation, invalid provenance/signature, digest mismatch, unsupported dependency, required recovery control, tool error, or required manual check.
 
 Lead with blockers, then show passes. State what was observed, executed, manually confirmed, and not checked. Remind the user that this reduced instruction, manual references, scanner output, and gate completion provide no security, compliance, profitability, or production-readiness guarantee.
+
+End by stating exactly which external or consequential actions were performed. If none, write
+`External actions performed: none`.
 
 ---
