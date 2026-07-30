@@ -37,6 +37,10 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def normalized_text(path: Path) -> str:
+    return " ".join(read_text(path).lower().split())
+
+
 def parse_frontmatter(path: Path) -> tuple[dict[str, str], str]:
     """Parse the intentionally small scalar frontmatter contract without PyYAML."""
 
@@ -214,6 +218,102 @@ class SkillPackageTests(unittest.TestCase):
         self.assertIn("no documented native agent skills import", readme_flat)
         self.assertIn("will not automatically load", readme_flat)
         self.assertIn("will not run the python scanner", readme_flat)
+
+    def test_v0_adapter_preserves_mode_market_and_conversion_stop_rules(self) -> None:
+        adapter = normalized_text(V0_ADAPTER)
+
+        self.assertNotIn("synthetic data and sandbox services", adapter)
+        self.assertIn("local emulators, or in-process fakes", adapter)
+        self.assertRegex(
+            adapter,
+            r"external provider sandbox.+?networked external service.+?elevate it to `ship`.+?approval",
+        )
+        for phrase in (
+            "first reachable cohort",
+            "channel owner",
+            "access mechanism",
+            "handoff/message",
+            "distribution friction",
+            "activation: [actor], after [precondition], completes [action] on [object] within [time window]",
+            "proposed success threshold with rationale",
+            "stop condition",
+            "package-manager/lockfile convention",
+            "unrelated changes to preserve",
+            "provider-hosted checkout",
+            "collecting card data in the browser",
+            "accepted loss of presentation or provider control",
+            "stable plan identifier",
+            "allowlisted server-owned price",
+            "reject client-supplied amount",
+            "accessible self-service path",
+            "external actions performed: none",
+        ):
+            self.assertIn(phrase, adapter)
+
+    def test_v0_adapter_preserves_security_backend_and_authority_stop_rules(self) -> None:
+        adapter = normalized_text(V0_ADAPTER)
+
+        for phrase in (
+            "mark the exact asvs mapping unresolved",
+            "callback",
+            "authenticity",
+            "freshness",
+            "replay resistance",
+            "atomic idempotency",
+            "bounded retry",
+            "safe failure",
+            "raw html",
+            "context-appropriate sanitizer",
+            "adversarial rendering tests",
+            "block unconditional allow rules",
+            "security definer",
+            "fixed `search_path`",
+            "preserve valid ui evidence",
+            "release recommendation separate for each candidate",
+            "publisher or update source is unknown",
+            "required scope remains unrestricted",
+            "allowlist individual methods and outbound destinations",
+            "sandboxed read-only access",
+            "attributable audit record",
+            "separate explicit approval",
+            "never open, read, request, echo, or reproduce an omitted fixture, canary, or credential value",
+            "backup deletion",
+            "subprocessor terms",
+        ):
+            self.assertIn(phrase, adapter)
+
+    def test_v0_adapter_preserves_supply_privacy_and_operations_stop_rules(self) -> None:
+        adapter = normalized_text(V0_ADAPTER)
+
+        for phrase in (
+            "do not install a dependency or execute a lifecycle or remote script",
+            "unsupported dependency",
+            "known-exploited vulnerability above policy",
+            "unresolved lockfile conflict",
+            "unreviewed install script",
+            "mutable release automation",
+            "incomplete transitive sbom",
+            "invalid provenance or signature",
+            "artifact/deployed digest mismatch",
+            "local preflight result cannot override",
+            "secret-history, cloud, and production-authorization checks explicitly missing",
+            "rebuilt artifact identity",
+            "precise or high-frequency child location",
+            "less invasive alternatives",
+            "brazil",
+            "european union",
+            "guardian and child authorization",
+            "cross-account denial evidence",
+            "raw-location logging",
+            "no raw location in logs",
+            "rate/spend limits",
+            "backup restore drill",
+            "migration recovery",
+            "bounded retries/timeouts",
+            "redacted alerts with an owner",
+            "kill switch",
+        ):
+            self.assertIn(phrase, adapter)
 
     def test_public_claims_are_qualified(self) -> None:
         readme = read_text(REPOSITORY_ROOT / "README.md").lower()

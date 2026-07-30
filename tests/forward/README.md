@@ -24,12 +24,38 @@ belong in `raw-final/`; they do not replace either class of failure evidence.
 
 ## Reproduction command
 
-The recorded evaluation uses Codex CLI in a disposable checkout:
+The candidate evaluation uses Codex CLI in a disposable checkout. Run this from one isolated
+scenario directory so the response and complete JSONL event stream stay together:
 
 ```sh
-codex exec --ephemeral --ignore-rules --skip-git-repo-check --sandbox read-only \
-  --color never --output-last-message response.md - < prompt.md
+codex --version | tee codex-version.txt
+set -o pipefail
+codex exec --ephemeral --ignore-rules --skip-git-repo-check \
+  --sandbox read-only --color never --json \
+  --model gpt-5.6-sol --config 'model_reasoning_effort="low"' \
+  --output-last-message response.md - < prompt.md | tee events.jsonl
 ```
 
-The exact CLI version, model, provider, commit, and file hashes are recorded in the result manifest.
-Host defaults outside those recorded values are not assumed to be portable.
+Capture the Codex thread ID from the `thread.started` event instead of recording a PTY or shell
+process identifier:
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+events = [json.loads(line) for line in Path("events.jsonl").read_text(encoding="utf-8").splitlines()]
+thread_ids = {
+    event["thread_id"]
+    for event in events
+    if event.get("type") == "thread.started" and event.get("thread_id")
+}
+if len(thread_ids) != 1:
+    raise SystemExit(f"expected one Codex thread ID, found {len(thread_ids)}")
+Path("thread-id.txt").write_text(next(iter(thread_ids)) + "\n", encoding="utf-8")
+PY
+```
+
+Record the exact CLI version, model, provider, candidate commit, skill tree, prompt/artifact hashes,
+thread ID, start/end timestamps, and response hash in the result manifest. Host defaults outside
+those recorded values are not assumed to be portable.

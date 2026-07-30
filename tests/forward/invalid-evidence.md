@@ -16,13 +16,17 @@ Host facts:
 - reasoning: low
 - isolation: ephemeral session, read-only sandbox, disposable candidate directory
 
+The Codex thread IDs below were retained for candidate `ccdacf1`; exact per-run launch timestamps were
+not retained and are unavailable. They must not be inferred from Git commit times or filesystem
+metadata.
+
 ## F01 result — 0/3 pass
 
 The runs generally chose a bounded experiment and blocked the public launch, but inconsistently
 recorded distribution friction, the rationale for numeric thresholds, every explicit non-goal, and
 the required statement that no external action occurred.
 
-| Run | Session ID | SHA-256 |
+| Run | Codex thread ID | SHA-256 |
 | --- | --- | --- |
 | 1 | `019fb41d-8e6f-7073-8a4d-2637522c1861` | `c91fb01d7e1e91f4c3da658c926ed2e8a091ad8a56f918d41240684c2ce454bf` |
 | 2 | `019fb41d-8e71-7050-b6da-484bc4c415ff` | `73f6f2a42e0101140da0de1ef8049ab19a0b557475f683d475aa440586c0bd93` |
@@ -35,7 +39,7 @@ did not consistently require accessible self-service cancellation or preserve th
 convention, missed state/performance dispositions, and proposed external sandbox interactions without
 an explicit future approval gate.
 
-| Run | Session ID | SHA-256 |
+| Run | Codex thread ID | SHA-256 |
 | --- | --- | --- |
 | 1 | `019fb41e-aafa-77d0-bf39-7baae46dfe01` | `920715cad776d5b487cef9c31c66409e2bc0eb929be7c6de19b5e5ceaf6a0bfb` |
 | 2 | `019fb41e-ab0a-7502-a227-6899aac79b2d` | `5282c4a6d6fe27c1d25f5453695258dbd556d1dc740165bfbac6a3978c7d2aef` |
@@ -50,7 +54,10 @@ bounded-work expectation. Its F01 behavior score was also only 2/3: run 1 did no
 activation precondition. These responses are preserved as invalid evidence (with a single normalized
 terminal newline) and do not contribute to the release score.
 
-| Run | Session ID | SHA-256 | Result |
+The Codex thread IDs below were retained for candidate `6854bc0`; exact per-run launch timestamps were
+not retained and are unavailable.
+
+| Run | Codex thread ID | SHA-256 | Result |
 | --- | --- | --- | --- |
 | 1 | `019fb438-a3e5-72c1-8434-55c1c38c845a` | `ff4b6fe4c7e93e0c27ecf3e73c73645dd15593329c21fd2f2cbc52319a9e8a5d` | FAIL |
 | 2 | `019fb438-a3fb-7041-9284-6083b16b0014` | `0a53f71cd8dbbe2891773cae3f1fe344b569400f8003af900a7f74567d4707df` | PASS |

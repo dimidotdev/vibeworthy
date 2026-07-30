@@ -16,11 +16,14 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import shlex
 import stat
 import subprocess
 import sys
+import threading
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from typing import Iterable, Sequence
@@ -296,6 +299,7 @@ class Candidate:
     display_path: str
     tracked: bool | None
     source_id: bytes = b""
+    scope_path: str = ""
 
 
 @dataclasses.dataclass
@@ -368,6 +372,10 @@ class UsageFailure(Exception):
 
 class GitUnavailable(Exception):
     """Git is optional; filesystem scope remains available when it is absent."""
+
+
+class CandidateLimitExceeded(Exception):
+    """Candidate enumeration stopped before retaining an unbounded path list."""
 
 
 class SafeArgumentParser(argparse.ArgumentParser):
@@ -566,7 +574,150 @@ def _is_secret_assignment_name(value: str) -> bool:
     return supabase_index >= 0 and normalized.find("service_role", supabase_index + 8) >= 0
 
 
-def _generic_assignments(line: str) -> Iterable[tuple[str, str]]:
+def _normalized_assignment_line(line: str) -> str:
+    """Bridge block comments and quoted subscripts without evaluating source."""
+
+    if "/*" not in line and "[" not in line:
+        return line
+    output: list[str] = []
+    index = 0
+    quote_character: str | None = None
+    escaped = False
+    while index < len(line):
+        character = line[index]
+        if quote_character is not None:
+            output.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote_character:
+                quote_character = None
+            index += 1
+            continue
+        if character in {'"', "'"}:
+            quote_character = character
+            output.append(character)
+            index += 1
+            continue
+        if line.startswith("/*", index):
+            output.append(" ")
+            index += 2
+            while index < len(line) and not line.startswith("*/", index):
+                index += 1
+            index = min(len(line), index + 2)
+            output.append(" ")
+            continue
+        if character == "[":
+            cursor = index + 1
+            while cursor < len(line) and line[cursor].isspace():
+                cursor += 1
+            if cursor < len(line) and line[cursor] in {'"', "'"}:
+                bracket_quote = line[cursor]
+                key_start = cursor + 1
+                cursor = key_start
+                while cursor < len(line) and line[cursor] != bracket_quote:
+                    if line[cursor] == "\\":
+                        break
+                    cursor += 1
+                if cursor < len(line) and line[cursor] == bracket_quote:
+                    key = line[key_start:cursor]
+                    cursor += 1
+                    while cursor < len(line) and line[cursor].isspace():
+                        cursor += 1
+                    if (
+                        cursor < len(line)
+                        and line[cursor] == "]"
+                        and key
+                        and all(
+                            item in _ASSIGNMENT_NAME_CHARS and item not in {'"', "'"}
+                            for item in key
+                        )
+                    ):
+                        output.extend((".", key))
+                        index = cursor + 1
+                        continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
+def _typed_assignment_separator(line: str, start: int) -> int | None:
+    """Find a nearby typed-assignment equals with a fixed linear-work budget."""
+
+    limit = min(len(line), start + 512)
+    index = start
+    while index < limit and line[index].isspace():
+        index += 1
+    type_start = index
+    quote_character: str | None = None
+    escaped = False
+    nesting: list[str] = []
+    pairs = {")": "(", "]": "[", "}": "{", ">": "<"}
+    while index < limit:
+        character = line[index]
+        if quote_character is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote_character:
+                quote_character = None
+            index += 1
+            continue
+        if character in {'"', "'"}:
+            quote_character = character
+            index += 1
+            continue
+        if character in "([{<":
+            nesting.append(character)
+            index += 1
+            continue
+        if character in pairs:
+            if nesting and nesting[-1] == pairs[character]:
+                nesting.pop()
+                index += 1
+                continue
+            if character == ">":
+                return None
+        if not nesting and character in {",", ";"}:
+            return None
+        if not nesting and character == "=":
+            if (
+                (index + 1 < len(line) and line[index + 1] in {"=", ">"})
+                or (index > type_start and line[index - 1] in {"=", "!", "<", ">"})
+            ):
+                return None
+            type_text = line[type_start:index].strip()
+            if type_text and any(item.isalpha() or item in {"_", "$"} for item in type_text):
+                return index
+            return None
+        if not nesting and character in {"@", "/", "%", "!", "~", "`"}:
+            return None
+        index += 1
+    return None
+
+
+def _assignment_value(line: str, separator: int) -> tuple[str, int, bool]:
+    value_index = separator + 1
+    while value_index < len(line) and line[value_index].isspace():
+        value_index += 1
+    quote_character = ""
+    if value_index < len(line) and line[value_index] in {'"', "'"}:
+        quote_character = line[value_index]
+        value_index += 1
+    value_start = value_index
+    while value_index < len(line) and line[value_index] in _ASSIGNMENT_VALUE_CHARS:
+        value_index += 1
+    value = line[value_start:value_index]
+    quote_closed = not quote_character or (
+        value_index < len(line) and line[value_index] == quote_character
+    )
+    next_index = value_index + (1 if quote_character and quote_closed else 0)
+    return value, next_index, quote_closed
+
+
+def _generic_assignments_core(line: str) -> Iterable[tuple[str, str]]:
     """Yield credential-like assignments without backtracking over untrusted text."""
 
     name_start: int | None = None
@@ -595,31 +746,37 @@ def _generic_assignments(line: str) -> Iterable[tuple[str, str]]:
             continue
 
         name = line[name_start:name_end] if name_start is not None and name_end is not None else ""
-        value_index = index + 1
-        while value_index < len(line) and line[value_index].isspace():
-            value_index += 1
-        quote_character = ""
-        if value_index < len(line) and line[value_index] in {'"', "'"}:
-            quote_character = line[value_index]
-            value_index += 1
-        value_start = value_index
-        while value_index < len(line) and line[value_index] in _ASSIGNMENT_VALUE_CHARS:
-            value_index += 1
-        value = line[value_start:value_index]
-        quote_closed = not quote_character or (
-            value_index < len(line) and line[value_index] == quote_character
-        )
-        if (
-            _is_secret_assignment_name(name)
-            and 12 <= len(value) <= 4_096
-            and quote_closed
-        ):
-            yield name, value
+        separators = [index]
+        if character == ":":
+            typed_separator = _typed_assignment_separator(line, index + 1)
+            if typed_separator is not None:
+                separators.append(typed_separator)
+        next_index = index + 1
+        for separator in separators:
+            value, value_end, quote_closed = _assignment_value(line, separator)
+            next_index = max(next_index, value_end)
+            if (
+                _is_secret_assignment_name(name)
+                and 12 <= len(value) <= 4_096
+                and quote_closed
+            ):
+                yield name, value
 
-        index = value_index + (1 if quote_character and quote_closed else 0)
+        index = next_index
         name_start = None
         name_end = None
         whitespace_after_name = False
+
+
+def _generic_assignments(line: str) -> Iterable[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    normalized = _normalized_assignment_line(line)
+    for candidate_line in (line,) if normalized == line else (line, normalized):
+        for name, value in _generic_assignments_core(candidate_line):
+            key = (_normalized_assignment_name(name), value)
+            if key not in seen:
+                seen.add(key)
+                yield name, value
 
 
 def _secret_assignment_separator(value: str) -> int | None:
@@ -695,6 +852,17 @@ def _relative_display(path: Path, root: Path, root_is_file: bool) -> str:
     return _safe_display_component(raw)
 
 
+def _filesystem_scope_path(path: Path, fallback: str) -> str:
+    """Recover security-relevant path context when no Git root is available."""
+
+    parts = path.parts
+    lowered = tuple(part.lower() for part in parts)
+    for index in range(len(parts) - 1):
+        if lowered[index : index + 2] == (".github", "workflows"):
+            return Path(*parts[index:]).as_posix()
+    return fallback
+
+
 def _disambiguate_display_paths(candidates: Sequence[Candidate]) -> list[Candidate]:
     """Give sanitization collisions distinct, opaque report locations."""
 
@@ -744,23 +912,37 @@ def _skip_path_reason(display_path: str) -> str | None:
     return None
 
 
-def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
+def _git_environment() -> dict[str, str]:
+    """Keep the caller's normal config locations but remove Git behavior overrides."""
+
     environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.upper().startswith("GIT_"):
+            environment.pop(name, None)
     environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return environment
+
+
+def _git_command(arguments: Sequence[str]) -> list[str]:
+    return [
+        "git",
+        "-c",
+        "core.quotepath=false",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        *arguments,
+    ]
+
+
+def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
     try:
         completed = subprocess.run(
-            [
-                "git",
-                "-c",
-                "core.quotepath=false",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "core.untrackedCache=false",
-                *arguments,
-            ],
+            _git_command(arguments),
             cwd=os.fspath(cwd),
-            env=environment,
+            env=_git_environment(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -774,7 +956,112 @@ def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
     return completed.returncode, completed.stdout
 
 
-def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[Candidate] | None:
+def _run_git_paths(cwd: Path, arguments: Sequence[str], max_paths: int) -> tuple[int, list[bytes]]:
+    """Read NUL-delimited Git paths with bounded buffering and an early count limit."""
+
+    try:
+        process = subprocess.Popen(
+            _git_command(arguments),
+            cwd=os.fspath(cwd),
+            env=_git_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise GitUnavailable from exc
+    except OSError as exc:
+        raise RuntimeError("git-failed") from exc
+
+    chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=4)
+    stop_reader = threading.Event()
+    reader_failed = threading.Event()
+
+    def publish(item: bytes | None) -> bool:
+        while not stop_reader.is_set():
+            try:
+                chunks.put(item, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def read_stdout() -> None:
+        try:
+            if process.stdout is None:
+                reader_failed.set()
+                return
+            while not stop_reader.is_set():
+                chunk = process.stdout.read(65_536)
+                if not chunk:
+                    break
+                if not publish(chunk):
+                    return
+        except OSError:
+            reader_failed.set()
+        finally:
+            publish(None)
+
+    reader = threading.Thread(target=read_stdout, name="vibeworthy-git-reader", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + 30
+    entries: list[bytes] = []
+    pending = b""
+    exceeded = False
+    timed_out = False
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                chunk = chunks.get(timeout=remaining)
+            except queue.Empty:
+                timed_out = True
+                break
+            if chunk is None:
+                break
+            parts = (pending + chunk).split(b"\0")
+            pending = parts.pop()
+            for encoded_path in parts:
+                if not encoded_path:
+                    continue
+                if len(entries) >= max_paths:
+                    exceeded = True
+                    break
+                entries.append(encoded_path)
+            if exceeded:
+                break
+    finally:
+        if exceeded or timed_out:
+            stop_reader.set()
+            process.kill()
+        try:
+            process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stop_reader.set()
+            process.kill()
+            process.wait()
+        stop_reader.set()
+        if process.stdout is not None:
+            process.stdout.close()
+        reader.join(timeout=1)
+
+    if exceeded:
+        raise CandidateLimitExceeded
+    if timed_out or reader_failed.is_set() or reader.is_alive() or pending:
+        raise RuntimeError("git-failed")
+    return process.returncode, entries
+
+
+def _git_candidates(
+    target: Path,
+    target_is_file: bool,
+    max_files: int,
+    report: Report,
+) -> list[Candidate] | None:
     probe = target.parent if target_is_file else target
     try:
         return_code, root_output = _run_git(probe, ["rev-parse", "--show-toplevel"])
@@ -806,20 +1093,36 @@ def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[
     by_raw_path: dict[str, Candidate] = {}
     for tracked, command in commands:
         try:
-            return_code, output = _run_git(git_root, command)
-        except RuntimeError:
+            return_code, encoded_paths = _run_git_paths(
+                git_root,
+                command,
+                max_files - len(by_raw_path),
+            )
+        except CandidateLimitExceeded:
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.file-limit",
+                    "The candidate-file limit was exceeded; enumeration stopped before a partial clean result was produced.",
+                )
+            )
+            return []
+        except (GitUnavailable, RuntimeError):
             report.tool_errors.append(ToolIssue("tool.git-enumeration", "Git worktree enumeration failed."))
             return []
         if return_code != 0:
             report.tool_errors.append(ToolIssue("tool.git-enumeration", "Git worktree enumeration failed."))
             return []
-        for encoded_path in output.split(b"\0"):
-            if not encoded_path:
-                continue
+        for encoded_path in encoded_paths:
             raw_relative = os.fsdecode(encoded_path)
             candidate_path = git_root / raw_relative
             display = _relative_display(candidate_path, target_resolved, target_is_file)
-            by_raw_path[raw_relative] = Candidate(candidate_path, display, tracked, os.fsencode(raw_relative))
+            by_raw_path[raw_relative] = Candidate(
+                candidate_path,
+                display,
+                tracked,
+                os.fsencode(raw_relative),
+                raw_relative,
+            )
 
     report.scope = Scope(
         mode="git-worktree",
@@ -829,14 +1132,36 @@ def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[
     return _disambiguate_display_paths(list(by_raw_path.values()))
 
 
-def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -> list[Candidate]:
+def _filesystem_candidates(
+    target: Path,
+    target_is_file: bool,
+    max_files: int,
+    report: Report,
+) -> list[Candidate]:
     report.scope = Scope(
         mode="filesystem",
         includes=["regular-files"],
         excludes=["git-history", "submodules", "symlinks", "binary", "generated-or-vendor", "oversized"],
     )
     if target_is_file:
-        return [Candidate(target, _safe_display_component(target.name), None, os.fsencode(target.name))]
+        if max_files < 1:
+            report.tool_errors.append(
+                ToolIssue(
+                    "tool.file-limit",
+                    "The candidate-file limit was exceeded; enumeration stopped before a partial clean result was produced.",
+                )
+            )
+            return []
+        display = _safe_display_component(target.name)
+        return [
+            Candidate(
+                target,
+                display,
+                None,
+                os.fsencode(target.name),
+                _filesystem_scope_path(target, display),
+            )
+        ]
 
     candidates: list[Candidate] = []
     errors: list[OSError] = []
@@ -860,13 +1185,34 @@ def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -
         for file_name in sorted(file_names):
             path = current_path / file_name
             raw_relative = os.fspath(path.relative_to(target))
-            candidates.append(Candidate(path, _relative_display(path, target, False), None, os.fsencode(raw_relative)))
+            display = _relative_display(path, target, False)
+            if len(candidates) >= max_files:
+                report.tool_errors.append(
+                    ToolIssue(
+                        "tool.file-limit",
+                        "The candidate-file limit was exceeded; enumeration stopped before a partial clean result was produced.",
+                    )
+                )
+                return []
+            candidates.append(
+                Candidate(
+                    path,
+                    display,
+                    None,
+                    os.fsencode(raw_relative),
+                    _filesystem_scope_path(path, display),
+                )
+            )
     if errors:
         report.tool_errors.append(ToolIssue("tool.walk", "One or more directories could not be enumerated safely."))
     return _disambiguate_display_paths(candidates)
 
 
-def _enumerate_candidates(target: Path, report: Report) -> tuple[list[Candidate], Path, bool]:
+def _enumerate_candidates(
+    target: Path,
+    max_files: int,
+    report: Report,
+) -> tuple[list[Candidate], Path, bool]:
     try:
         target_stat = os.lstat(target)
     except (OSError, ValueError):
@@ -885,9 +1231,9 @@ def _enumerate_candidates(target: Path, report: Report) -> tuple[list[Candidate]
         report.tool_errors.append(ToolIssue("tool.target", "The requested target could not be resolved safely."))
         return [], target, target_is_file
 
-    candidates = _git_candidates(resolved, target_is_file, report)
+    candidates = _git_candidates(resolved, target_is_file, max_files, report)
     if candidates is None:
-        candidates = _filesystem_candidates(resolved, target_is_file, report)
+        candidates = _filesystem_candidates(resolved, target_is_file, max_files, report)
     return candidates, resolved, target_is_file
 
 
@@ -910,7 +1256,7 @@ def _has_symlink_component(path: Path, allowed_root: Path) -> bool:
 
 
 def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, max_bytes: int, report: Report) -> str | None:
-    skip_reason = _skip_path_reason(candidate.display_path)
+    skip_reason = _skip_path_reason(candidate.scope_path or candidate.display_path)
     if skip_reason:
         report.skipped[skip_reason] += 1
         return None
@@ -1112,61 +1458,179 @@ def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
         yield start_line, " ".join(parts)
 
 
-def _command_invocation(tokens: Sequence[str]) -> tuple[str | None, int | None]:
+@dataclasses.dataclass(frozen=True)
+class _CommandInvocation:
+    tokens: tuple[str, ...]
+    executable: str | None
+    executable_index: int | None
+    complete: bool = True
+
+
+def _command_invocation(tokens: Sequence[str], depth: int = 0) -> _CommandInvocation:
+    current_tokens = tuple(tokens)
+    if depth > 4:
+        return _CommandInvocation(current_tokens, None, None, False)
+
     index = 0
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
-    while index < len(tokens) and assignment.fullmatch(tokens[index]):
+    while index < len(current_tokens) and assignment.fullmatch(current_tokens[index]):
         index += 1
-    wrappers = {"command", "env", "exec", "sudo"}
-    options_with_value = {
-        "env": {"-u", "--unset", "-C", "--chdir"},
-        "sudo": {
-            "-C",
-            "--chdir",
-            "-g",
-            "--group",
-            "-h",
-            "--host",
-            "-p",
-            "--prompt",
-            "-R",
-            "--chroot",
-            "-r",
-            "--role",
-            "-T",
-            "--command-timeout",
-            "-t",
-            "--type",
-            "-u",
-            "--user",
-            "-U",
-            "--other-user",
-        },
+    sudo_options_with_value = {
+        "-C",
+        "--chdir",
+        "-g",
+        "--group",
+        "-h",
+        "--host",
+        "-p",
+        "--prompt",
+        "-R",
+        "--chroot",
+        "-r",
+        "--role",
+        "-T",
+        "--command-timeout",
+        "-t",
+        "--type",
+        "-u",
+        "--user",
+        "-U",
+        "--other-user",
     }
-    while index < len(tokens):
-        name = _normalized_executable_name(tokens[index])
-        if name not in wrappers:
-            return name, index
+    env_options_with_value = {"-u", "--unset", "-C", "--chdir", "-a", "--argv0"}
+    timeout_options_with_value = {"-k", "--kill-after", "-s", "--signal"}
+
+    while index < len(current_tokens):
+        wrapper_index = index
+        name = _normalized_executable_name(current_tokens[index])
+        if name == "busybox":
+            applet_index = index + 1
+            if applet_index < len(current_tokens) and not current_tokens[applet_index].startswith("-"):
+                return _CommandInvocation(
+                    current_tokens,
+                    _normalized_executable_name(current_tokens[applet_index]),
+                    applet_index,
+                )
+            return _CommandInvocation(current_tokens, name, wrapper_index)
+        if name not in {"command", "env", "exec", "sudo", "nohup", "timeout"}:
+            return _CommandInvocation(current_tokens, name, index)
         index += 1
-        while index < len(tokens):
-            token = tokens[index]
-            if assignment.fullmatch(token) is not None:
+
+        if name == "command":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                if argument in {"-v", "-V"}:
+                    return _CommandInvocation(current_tokens, "command", wrapper_index)
                 index += 1
-                continue
-            if token == "--":
+            continue
+
+        if name == "env":
+            while index < len(current_tokens):
+                argument = current_tokens[index]
+                if assignment.fullmatch(argument) is not None:
+                    index += 1
+                    continue
+                split_string: str | None = None
+                tail_index = index + 1
+                if argument in {"-S", "--split-string"}:
+                    if tail_index >= len(current_tokens):
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    split_string = current_tokens[tail_index]
+                    tail_index += 1
+                elif argument.startswith("--split-string="):
+                    split_string = argument.split("=", 1)[1]
+                elif argument.startswith("-S") and argument != "-S":
+                    split_string = argument[2:]
+                if split_string is not None:
+                    embedded_tokens, complete = _tokenize_shell_line(split_string)
+                    if not complete or not embedded_tokens:
+                        return _CommandInvocation(current_tokens, None, None, False)
+                    return _command_invocation(
+                        (*embedded_tokens, *current_tokens[tail_index:]),
+                        depth + 1,
+                    )
+                if argument == "--":
+                    index += 1
+                    break
+                if not argument.startswith("-"):
+                    break
+                option = argument.split("=", 1)[0]
                 index += 1
-                break
-            if not token.startswith("-"):
-                break
-            option = token.split("=", 1)[0]
-            index += 1
-            if option in options_with_value.get(name, set()) and "=" not in token and index < len(tokens):
+                if (
+                    option in env_options_with_value
+                    and "=" not in argument
+                    and index < len(current_tokens)
+                ):
+                    index += 1
+            continue
+
+        if name == "exec":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
                 index += 1
-    return None, None
+                if argument == "-a" and index < len(current_tokens):
+                    index += 1
+            continue
+
+        if name == "sudo":
+            while index < len(current_tokens):
+                argument = current_tokens[index]
+                if assignment.fullmatch(argument) is not None:
+                    index += 1
+                    continue
+                if argument == "--":
+                    index += 1
+                    break
+                if not argument.startswith("-"):
+                    break
+                option = argument.split("=", 1)[0]
+                index += 1
+                if (
+                    option in sudo_options_with_value
+                    and "=" not in argument
+                    and index < len(current_tokens)
+                ):
+                    index += 1
+            continue
+
+        if name == "nohup":
+            if index < len(current_tokens) and current_tokens[index] == "--":
+                index += 1
+            elif index < len(current_tokens) and current_tokens[index].startswith("-"):
+                return _CommandInvocation(current_tokens, "nohup", wrapper_index)
+            continue
+
+        if name == "timeout":
+            while index < len(current_tokens) and current_tokens[index].startswith("-"):
+                argument = current_tokens[index]
+                if argument == "--":
+                    index += 1
+                    break
+                option = argument.split("=", 1)[0]
+                index += 1
+                if (
+                    option in timeout_options_with_value
+                    and "=" not in argument
+                    and index < len(current_tokens)
+                ):
+                    index += 1
+            if index >= len(current_tokens):
+                return _CommandInvocation(current_tokens, "timeout", wrapper_index)
+            index += 1  # duration
+            continue
+
+    return _CommandInvocation(current_tokens, None, None)
 
 
 def _shell_command_name(tokens: Sequence[str]) -> str | None:
-    return _command_invocation(tokens)[0]
+    invocation = _command_invocation(tokens)
+    return invocation.executable if invocation.complete else None
 
 
 def _normalized_executable_name(value: str) -> str:
@@ -1209,7 +1673,7 @@ def _tokens_have_remote_pipeline(tokens: Sequence[str]) -> bool:
     return finish_pipeline()
 
 
-def _shell_command_payloads(tokens: Sequence[str]) -> list[str]:
+def _shell_command_payloads(tokens: Sequence[str]) -> tuple[list[str], bool]:
     shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
     payloads: list[str] = []
     simple_commands: list[list[str]] = []
@@ -1226,22 +1690,32 @@ def _shell_command_payloads(tokens: Sequence[str]) -> list[str]:
 
     shell_options_with_value = {"-O", "-o", "--init-file", "--rcfile"}
     for command in simple_commands:
-        executable, executable_index = _command_invocation(command)
+        invocation = _command_invocation(command)
+        if not invocation.complete:
+            return payloads, False
+        executable = invocation.executable
+        executable_index = invocation.executable_index
+        invocation_arguments = invocation.tokens
         if executable_index is None:
             continue
 
         if executable == "cmd":
-            for index in range(executable_index + 1, len(command) - 1):
-                if command[index].lower() in {"/c", "/k"}:
-                    payloads.append(" ".join(command[index + 1 :]))
+            for index in range(executable_index + 1, len(invocation_arguments) - 1):
+                if invocation_arguments[index].lower() in {"/c", "/k"}:
+                    payloads.append(" ".join(invocation_arguments[index + 1 :]))
                     break
+            continue
+
+        if executable == "eval":
+            if executable_index + 1 < len(invocation_arguments):
+                payloads.append(" ".join(invocation_arguments[executable_index + 1 :]))
             continue
 
         if executable not in shells:
             continue
         index = executable_index + 1
-        while index < len(command):
-            option = command[index]
+        while index < len(invocation_arguments):
+            option = invocation_arguments[index]
             if option == "--":
                 break
             if not option.startswith("-") or option == "-":
@@ -1253,17 +1727,20 @@ def _shell_command_payloads(tokens: Sequence[str]) -> list[str]:
             )
             if is_command_option:
                 payload_index = index + 1
-                if payload_index < len(command) and command[payload_index] == "--":
+                if (
+                    payload_index < len(invocation_arguments)
+                    and invocation_arguments[payload_index] == "--"
+                ):
                     payload_index += 1
-                if payload_index < len(command):
-                    payloads.append(command[payload_index])
+                if payload_index < len(invocation_arguments):
+                    payloads.append(invocation_arguments[payload_index])
                 break
             option_name = option.split("=", 1)[0]
             if option_name in shell_options_with_value and "=" not in option:
                 index += 2
                 continue
             index += 1
-    return payloads
+    return payloads, True
 
 
 def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
@@ -1445,7 +1922,9 @@ def _remote_pipeline_status(command: str, depth: int = 0) -> tuple[bool, bool]:
     if _tokens_have_remote_pipeline(tokens):
         return True, False
 
-    nested_payloads = _shell_command_payloads(tokens)
+    nested_payloads, payloads_complete = _shell_command_payloads(tokens)
+    if not payloads_complete:
+        return False, True
     substitution_payloads, substitutions_complete = _command_substitution_payloads(command)
     if not substitutions_complete:
         return False, True
@@ -1539,6 +2018,27 @@ def _normalized_firebase_rules(text: str) -> tuple[str, list[int]]:
     return "".join(output), line_numbers
 
 
+def _firebase_quoted_positions(text: str) -> bytearray:
+    """Mark quoted contents while leaving an opening JSON key quote structural."""
+
+    quoted = bytearray(len(text))
+    quote_character: str | None = None
+    escaped = False
+    for index, character in enumerate(text):
+        if quote_character is not None:
+            quoted[index] = 1
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote_character:
+                quote_character = None
+            continue
+        if character in {'"', "'"}:
+            quote_character = character
+    return quoted
+
+
 def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict[str, object] | None:
     lines = text.splitlines()
     seen: set[tuple[str, int]] = set()
@@ -1563,7 +2063,7 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
             add("VW-ENV-UNIGNORED", 1)
 
     firebase_rule_file = _is_firebase_rules_path(candidate.display_path)
-    workflow_file = _is_workflow_path(candidate.display_path)
+    workflow_file = _is_workflow_path(candidate.scope_path or candidate.display_path)
     service_account_type_line: int | None = None
     service_account_private_line: int | None = None
 
@@ -1623,8 +2123,28 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
 
     if firebase_rule_file:
         normalized_rules, normalized_line_numbers = _normalized_firebase_rules(text)
+        quoted_positions = _firebase_quoted_positions(normalized_rules)
         for pattern in (_FIREBASE_RTD_RULE_RE, _FIREBASE_ALLOW_RE):
             for match in pattern.finditer(normalized_rules):
+                if match.start() < len(quoted_positions) and quoted_positions[match.start()]:
+                    continue
+                if pattern is _FIREBASE_RTD_RULE_RE and normalized_rules[match.start()] in {'"', "'"}:
+                    opening_quote = normalized_rules[match.start()]
+                    key_start = match.start() + 1
+                    key = next(
+                        (
+                            candidate_key
+                            for candidate_key in (".read", ".write")
+                            if normalized_rules.startswith(candidate_key, key_start)
+                        ),
+                        None,
+                    )
+                    if (
+                        key is None
+                        or key_start + len(key) >= len(normalized_rules)
+                        or normalized_rules[key_start + len(key)] != opening_quote
+                    ):
+                        continue
                 line_number = (
                     normalized_line_numbers[match.start()]
                     if match.start() < len(normalized_line_numbers)
@@ -1633,8 +2153,12 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
                 add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
 
     if candidate.path.suffix.lower() == ".sql":
+        previous_match_start = 0
+        sql_line_number = 1
         for match in _SUPABASE_RLS_DISABLED_RE.finditer(text):
-            add("VW-SUPABASE-RLS-DISABLED", text.count("\n", 0, match.start()) + 1)
+            sql_line_number += text.count("\n", previous_match_start, match.start())
+            previous_match_start = match.start()
+            add("VW-SUPABASE-RLS-DISABLED", sql_line_number)
 
     if candidate.path.name != "package.json":
         return None
@@ -1701,7 +2225,11 @@ def _add_dependency_findings(
     lockfiles_by_directory: dict[Path, list[Candidate]] = {}
     for candidate in candidates:
         if candidate.path.name in _LOCKFILES and not (
-            {part.lower() for part in Path(candidate.display_path).parts[:-1]} & _SKIP_DIR_NAMES
+            {
+                part.lower()
+                for part in Path(candidate.scope_path or candidate.display_path).parts[:-1]
+            }
+            & _SKIP_DIR_NAMES
         ):
             lockfiles_by_directory.setdefault(candidate.path.parent, []).append(candidate)
     for lockfiles in lockfiles_by_directory.values():
@@ -1835,12 +2363,20 @@ def _apply_suppressions(findings: list[Finding], sources: dict[bytes, str], toda
 
 def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FILE_BYTES, max_files: int = DEFAULT_MAX_FILES) -> Report:
     report = Report()
+    if max_files <= 0:
+        report.tool_errors.append(
+            ToolIssue(
+                "tool.file-limit",
+                "The candidate-file limit must be positive.",
+            )
+        )
+        return report
     try:
         target = Path(path)
     except (TypeError, ValueError):
         report.tool_errors.append(ToolIssue("tool.target", "The requested target is invalid."))
         return report
-    candidates, scan_root, root_is_file = _enumerate_candidates(target, report)
+    candidates, scan_root, root_is_file = _enumerate_candidates(target, max_files, report)
     if report.tool_errors:
         return report
     report.files_considered = len(candidates)

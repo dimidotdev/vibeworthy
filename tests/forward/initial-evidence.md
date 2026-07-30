@@ -17,11 +17,14 @@ All three runs selected a bounded learning path for A and `NO-GO` for B, but omi
 of the required distribution path and activation structure. At least one run also omitted the
 rationale for its proposed success threshold. This repeated omission triggered a skill revision.
 
-Session IDs:
+The Codex thread IDs were retained, but the exact per-run launch timestamps were not retained and are
+unavailable. They must not be inferred from Git commit times or filesystem metadata.
 
-- `019fb40a-d7d4-7140-a4fe-e181aa89c4c8`
-- `019fb40a-d7dc-7e13-ad4d-1d482d88c53d`
-- `019fb40a-d7d0-7213-87d5-f5ea6e97d1ae`
+| Run | Codex thread ID |
+| --- | --- |
+| 1 | `019fb40a-d7d4-7140-a4fe-e181aa89c4c8` |
+| 2 | `019fb40a-d7dc-7e13-ad4d-1d482d88c53d` |
+| 3 | `019fb40a-d7d0-7213-87d5-f5ea6e97d1ae` |
 
 ## F02 result — 0/3 pass
 
@@ -29,6 +32,17 @@ All three runs chose hosted checkout and rejected the requested deceptive patter
 consistently provide the explicit two-option comparison, accepted cost and revisit trigger, or full
 state/performance disposition required by the rubric. This repeated omission triggered a skill
 revision.
+
+The launcher record retained the batch launch timestamp `2026-07-30T17:21:47.164Z` and the transient
+PTY session IDs below. The Codex thread IDs and exact per-run launch timestamps were not retained and
+are unavailable. PTY session IDs are local process handles, not Codex thread IDs or durable evidence
+identifiers.
+
+| Run | Codex thread ID | Transient PTY session ID |
+| --- | --- | --- |
+| 1 | unavailable — not retained | `53602` |
+| 2 | unavailable — not retained | `30652` |
+| 3 | unavailable — not retained | `1226` |
 
 ## Immutable input and output hashes
 

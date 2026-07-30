@@ -4,7 +4,14 @@ Copy this file for one release candidate. Record facts for the named artifact an
 
 ## Release identity
 
-- Artifact / commit / digest: `[immutable identity]`
+- Evaluated candidate commit (C): `[full 40-character commit SHA]`
+- Evaluated `skill/vibeworthy` tree (T): `[full Git tree SHA from C]`
+- Release/tag commit (R): `[full 40-character commit SHA]`
+- Tag/ref: `[annotated tag or workflow-dispatch ref; tags remain movable labels]`
+- Skill archive (A): `[exact filename; archive root must be vibeworthy/]`
+- Skill archive SHA-256 (D): `[64 lowercase hexadecimal characters]`
+- Companion SBOM: `[exact filename and SHA-256]`
+- Build provenance attestation: `[GitHub attestation ID/URL and bundle filename/SHA-256]`
 - Included scope: `[features and data flows]`
 - Excluded scope: `[explicit exclusions]`
 - Environment and destination: `[staging/production; named project]`
@@ -13,6 +20,18 @@ Copy this file for one release candidate. Record facts for the named artifact an
 - Release owner: `[name/role]`
 - Independent reviewer: `[name/role]`
 - Effective safety mode: `ship`
+
+Record C and T before evaluation. At release time, verify that C is an ancestor of R and that
+`git rev-parse C:skill/vibeworthy` equals `git rev-parse R:skill/vibeworthy`; C and R may be the same
+commit. A and D identify the distributed bytes. Do not manufacture a future commit SHA inside a file
+that the future commit must contain: record tag, workflow-run, attestation, and final asset facts in
+the generated release manifest or another post-build evidence record. A GitHub build provenance
+attestation is provenance evidence; record signature verification only when it was actually
+performed and retained.
+
+For a tag-triggered build, use an annotated SemVer tag and include exactly one trailer line:
+`VibeWorthy-Candidate-Commit: <C>`. The workflow rejects lightweight tags, missing/duplicate
+trailers, non-ancestor candidates, and any R whose skill tree differs from T.
 
 ## Blockers first
 

