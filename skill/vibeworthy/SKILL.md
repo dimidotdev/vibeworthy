@@ -56,6 +56,12 @@ Copy [the build brief template](assets/build-brief.md) and keep it current. Befo
 - the requested outcome, build contract, non-goals, constraints, and effective mode;
 - repository facts, authority limits, consequential decisions, trust boundaries, and open blockers.
 
+Do not omit a field because evidence is missing: write `unknown` and attach the cheapest test that can
+change the decision. For every `explore` or `prototype` response, make the distribution path concrete
+enough to name the first reachable cohort, channel owner, access mechanism, message or handoff, and
+friction. Define activation with actor, action, object, precondition, and time window. Label the success
+threshold as proposed, name its rationale, and give an observable stop or redesign condition.
+
 Do not turn missing market evidence into decorative metrics. Propose the cheapest ethical test that can change the decision. Read [market and engineering](references/market-engineering.md) for the evidence, ICP, distribution, activation, options, slicing, UX, and accessibility procedures.
 
 ## 4. Inspect, choose, and implement in vertical slices
@@ -64,9 +70,16 @@ Inspect the actual project before material edits. Identify its stack, convention
 
 For every consequential or hard-to-reverse decision, compare at least two viable options against user value, risk, maintenance, accessibility, cost, portability, and reversibility. Record the chosen option and rejected tradeoff; do not manufacture a second option for a trivial change.
 
+Show that comparison explicitly rather than only announcing a preference. Name the accepted cost and
+the evidence or event that would trigger revisiting the choice.
+
 Implement one thin end-to-end behavior at a time. Give each slice one user-visible outcome, enforcement boundary, verification seam, and rollback or recovery path. Verify the smallest relevant checks after each slice before widening scope.
 
 For user-facing work, prove semantic structure, accessible names, keyboard and focus completion, mobile completion at 320 CSS pixels, loading/empty/error/recovery states, realistic content extremes, clear validation, and non-deceptive choices. Test performance at the moment where the user receives or commits to value. Avoid forced continuity, hidden cost, disguised advertising, obstructed cancellation, false urgency, and preselected consent.
+
+Disposition every listed state as tested, unresolved, or not applicable with a reason. Include long and
+translated content, duplicate or stale actions where relevant, timeout and retry behavior, focus
+restoration, and the exact performance boundary at the activation or commitment moment.
 
 ## 5. Build evidence at changed trust boundaries
 
@@ -91,6 +104,10 @@ For public release, also require relevant authorization matrices, secret-history
 
 ## 7. Decide release status
 
+Issue `GO`, `CONDITIONAL`, or `NO-GO` only when the effective mode is `ship` or the user asks for a
+release decision. For `explore` and private `prototype` work, say whether to proceed with the bounded
+experiment without calling that experiment `GO`; release status has not been evaluated.
+
 Copy [the release evidence template](assets/release-evidence.md). Name the artifact or commit, scope, environment, date, and policy. Put blockers before successful checks and assign every failure or residual risk an owner and next action.
 
 Return exactly one recommendation:
@@ -106,8 +123,11 @@ State what the recommendation does not establish. Prefer `NO-GO` over implied ce
 Return these sections in order and omit empty detail:
 
 1. `Mode` — requested mode, effective mode, and elevation triggers.
-2. `Evidence` — known facts, assumptions, ICP, distribution, activation, success signal, and stop condition.
-3. `Contract` — smallest slice, non-goals, authority envelope, and options decision.
+2. `Evidence` — known facts and unknowns; assumptions; ICP; first cohort, owner, channel/access,
+   handoff, and friction; activation actor/action/object/precondition/window; proposed success threshold
+   with rationale; and stop condition.
+3. `Contract` — smallest slice, non-goals, authority envelope, and an explicit options comparison with
+   accepted tradeoff and revisit trigger.
 4. `Slices` — completed behavior and per-slice verification.
 5. `Trust` — boundaries, OWASP/ASVS mappings, privacy/secrets/backend/supply-chain status, and blockers.
 6. `Release` — evidence table, residual risks, owner/action, and `GO`, `CONDITIONAL`, or `NO-GO` when a release decision was requested.

@@ -28,6 +28,14 @@
       {
         "name": "vibeworthy:scope",
         "value": "Agent Skill Markdown, templates, references, and a dependency-free local scanner"
+      },
+      {
+        "name": "vibeworthy:optional-external-tool",
+        "value": "Git improves worktree enumeration when available; the scanner disables repository fsmonitor execution and otherwise uses an explicitly labeled filesystem fallback"
+      },
+      {
+        "name": "vibeworthy:generator",
+        "value": "manually reviewed CycloneDX 1.6 manifest; release archive digest and source commit are recorded in the release evidence"
       }
     ]
   },

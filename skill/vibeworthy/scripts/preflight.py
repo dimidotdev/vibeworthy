@@ -21,7 +21,8 @@ import shlex
 import stat
 import subprocess
 import sys
-from collections import Counter
+import unicodedata
+from collections import Counter, defaultdict
 from typing import Iterable, Sequence
 from urllib.parse import quote
 
@@ -225,8 +226,8 @@ RULES: dict[str, Rule] = {
             "VW-SUPPRESSION-INVALID",
             BLOCKER,
             "Invalid warning suppression",
-            "A warning suppression is missing valid, independent, or future-dated approval metadata.",
-            "Keep the warning active or provide nonempty reason, owner, independent approved-by, compensating-control, and a future ISO expiry date on the same line.",
+            "A warning suppression is missing valid, distinct-approver, or future-dated metadata.",
+            "Keep the warning active or provide nonempty reason, owner, distinct approved-by, compensating-control, and a future ISO expiry date on the same line; verify approver independence outside the scanner.",
             "scanner-policy",
         ),
         _rule(
@@ -354,6 +355,10 @@ class UsageFailure(Exception):
     """An argument error that must not echo untrusted argument content."""
 
 
+class GitUnavailable(Exception):
+    """Git is optional; filesystem scope remains available when it is absent."""
+
+
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:  # noqa: ARG002 - intentionally redacted
         raise UsageFailure
@@ -461,13 +466,22 @@ _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY\b",
     re.IGNORECASE,
 )
-_FIREBASE_RTD_RULE_RE = re.compile(r"[\"']?\.(?:read|write)[\"']?\s*:\s*(?:true|[\"']true[\"'])", re.IGNORECASE)
+_FIREBASE_RTD_RULE_RE = re.compile(
+    r"[\"']?\.(?:read|write)[\"']?\s*:\s*(?:true|[\"']true[\"'])",
+    re.IGNORECASE,
+)
 _FIREBASE_ALLOW_RE = re.compile(
     r"\ballow\s+(?:(?:read|write|create|update|delete|get|list)\s*,?\s*)+\s*:\s*if\s+true\s*;",
     re.IGNORECASE,
 )
-_REMOTE_PIPE_RE = re.compile(r"\b(?:curl|wget)\b[^|\r\n]{0,1000}\|\s*(?:ba|z|k|c)?sh\b", re.IGNORECASE)
-_ACTION_USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*[\"']?(?P<reference>[^\s#\"']+)", re.IGNORECASE)
+_REMOTE_PIPE_RE = re.compile(
+    r"\b(?:curl|wget)\b[^|\r\n]{0,1000}\|\s*(?:(?:/[^/\s|]+)*/)?(?:ba|z|k|c)?sh\b",
+    re.IGNORECASE,
+)
+_ACTION_USES_RE = re.compile(
+    r"(?:^\s*-?\s*|[{,]\s*)uses\s*:\s*[\"']?(?P<reference>[^\s,}#\"']+)",
+    re.IGNORECASE,
+)
 _SUPPRESSION_HINT_RE = re.compile(r"vibeworthy\s*:\s*(?:ignore|suppress)\b", re.IGNORECASE)
 _SUPPRESSION_RE = re.compile(
     r"vibeworthy\s*:\s*(?:ignore|suppress)\s+(?:\[)?(?P<rule>[A-Za-z0-9._-]+)(?:\])?(?P<meta>.*)$",
@@ -496,8 +510,21 @@ def _safe_display_component(value: str) -> str:
         else:
             output.append(character)
     safe = "".join(output)
-    for pattern in (_PRIVATE_KEY_RE, _CLOUD_KEY_RE, _FIREBASE_KEY_RE, _SUPABASE_PUBLIC_RE, _SUPABASE_SECRET_RE, _JWT_RE, *_PROVIDER_TOKEN_RES):
+    for pattern in (
+        _PRIVATE_KEY_RE,
+        _CLOUD_KEY_RE,
+        _FIREBASE_KEY_RE,
+        _SUPABASE_PUBLIC_RE,
+        _SUPABASE_SECRET_RE,
+        _JWT_RE,
+        *_PROVIDER_TOKEN_RES,
+    ):
         safe = pattern.sub("[REDACTED]", safe)
+    safe = _CREDENTIAL_URL_RE.sub("[REDACTED-CREDENTIAL-URL]", safe)
+    safe = _GENERIC_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('name')}=[REDACTED]",
+        safe,
+    )
     return safe or "."
 
 
@@ -541,7 +568,16 @@ def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         completed = subprocess.run(
-            ["git", "-c", "core.quotepath=false", *arguments],
+            [
+                "git",
+                "-c",
+                "core.quotepath=false",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                *arguments,
+            ],
             cwd=os.fspath(cwd),
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -550,8 +586,10 @@ def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
             check=False,
             timeout=30,
         )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError("git-unavailable") from exc
+    except FileNotFoundError as exc:
+        raise GitUnavailable from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("git-failed") from exc
     return completed.returncode, completed.stdout
 
 
@@ -559,6 +597,8 @@ def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[
     probe = target.parent if target_is_file else target
     try:
         return_code, root_output = _run_git(probe, ["rev-parse", "--show-toplevel"])
+    except GitUnavailable:
+        return None
     except RuntimeError:
         report.tool_errors.append(ToolIssue("tool.git-unavailable", "Git could not be invoked safely."))
         return []
@@ -667,6 +707,24 @@ def _enumerate_candidates(target: Path, report: Report) -> tuple[list[Candidate]
     return candidates, resolved, target_is_file
 
 
+def _has_symlink_component(path: Path, allowed_root: Path) -> bool:
+    """Reject a candidate whose path below the root traverses a symlink."""
+
+    try:
+        relative = path.relative_to(allowed_root)
+    except ValueError:
+        return True
+    current = allowed_root
+    for component in relative.parts[:-1]:
+        current = current / component
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, max_bytes: int, report: Report) -> str | None:
     skip_reason = _skip_path_reason(candidate.display_path)
     if skip_reason:
@@ -692,12 +750,15 @@ def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, m
     if file_stat.st_size > max_bytes:
         report.skipped["oversized"] += 1
         return None
+    allowed_root = scan_root.parent if root_is_file else scan_root
+    if _has_symlink_component(candidate.path, allowed_root):
+        report.skipped["symlink"] += 1
+        return None
     try:
         resolved = candidate.path.resolve(strict=True)
     except OSError:
         report.tool_errors.append(ToolIssue("tool.file-resolution", "A candidate file could not be resolved safely.", candidate.display_path))
         return None
-    allowed_root = scan_root.parent if root_is_file else scan_root
     if not _contains_path(allowed_root, resolved) or (root_is_file and resolved != scan_root):
         report.skipped["outside-scope"] += 1
         return None
@@ -711,6 +772,15 @@ def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, m
             opened_stat = os.fstat(descriptor)
             if not stat.S_ISREG(opened_stat.st_mode):
                 report.skipped["special-file"] += 1
+                return None
+            if not os.path.samestat(file_stat, opened_stat):
+                report.tool_errors.append(
+                    ToolIssue(
+                        "tool.file-race",
+                        "A candidate changed identity while it was being opened; no content was scanned.",
+                        candidate.display_path,
+                    )
+                )
                 return None
             chunks: list[bytes] = []
             remaining = max_bytes + 1
@@ -743,22 +813,25 @@ def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, m
 
 def _placeholder(value: str) -> bool:
     lowered = value.strip().lower()
-    markers = (
-        "${",
-        "{{",
-        "<",
+    if not lowered:
+        return True
+    if lowered.startswith(("${", "{{", "<", "process.env")):
+        return True
+    tokens = [token for token in re.split(r"[^a-z0-9]+", lowered) if token]
+    if not tokens:
+        return True
+    placeholder_tokens = {
         "changeme",
         "dummy",
         "example",
         "fake",
         "placeholder",
-        "process.env",
         "replace",
-        "test-only",
-        "your_",
-        "your-",
-    )
-    return not lowered or any(marker in lowered for marker in markers)
+        "sample",
+        "test",
+        "your",
+    }
+    return tokens[0] in placeholder_tokens
 
 
 def _jwt_role(value: str) -> str | None:
@@ -874,14 +947,12 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
             if not _placeholder(value) and not _is_known_specialized_value(value):
                 add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
 
-        if firebase_rule_file and (_FIREBASE_RTD_RULE_RE.search(line) or _FIREBASE_ALLOW_RE.search(line)):
-            add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
         if _REMOTE_PIPE_RE.search(line):
             add("VW-REMOTE-INSTALL-SCRIPT", line_number)
         if workflow_file:
-            action_match = _ACTION_USES_RE.search(line)
-            if action_match and not _action_is_pinned(action_match.group("reference")):
-                add("VW-AUTOMATION-UNPINNED", line_number)
+            for action_match in _ACTION_USES_RE.finditer(line):
+                if not _action_is_pinned(action_match.group("reference")):
+                    add("VW-AUTOMATION-UNPINNED", line_number)
 
         if re.search(r"[\"']type[\"']\s*:\s*[\"']service_account[\"']", line):
             service_account_type_line = line_number
@@ -892,6 +963,11 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
 
     if service_account_type_line is not None and service_account_private_line is not None:
         add("VW-FIREBASE-SERVICE-ACCOUNT", service_account_private_line)
+
+    if firebase_rule_file:
+        for pattern in (_FIREBASE_RTD_RULE_RE, _FIREBASE_ALLOW_RE):
+            for match in pattern.finditer(text):
+                add("VW-FIREBASE-PERMISSIVE-RULE", text.count("\n", 0, match.start()) + 1)
 
     if candidate.path.suffix.lower() == ".sql":
         for match in _SUPABASE_RLS_DISABLED_RE.finditer(text):
@@ -989,7 +1065,15 @@ def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tup
         return False, None
     if any(len(metadata[key]) > 512 or any(ord(character) < 32 for character in metadata[key]) for key in required):
         return False, None
-    if metadata["owner"].strip().casefold() == metadata["approved-by"].strip().casefold():
+    def normalized_identity(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value)
+        return "".join(
+            character
+            for character in normalized.casefold().strip()
+            if unicodedata.category(character) != "Cf" and not character.isspace()
+        )
+
+    if normalized_identity(metadata["owner"]) == normalized_identity(metadata["approved-by"]):
         return False, None
     try:
         expiry = dt.date.fromisoformat(metadata["expires"].strip())
@@ -1003,11 +1087,14 @@ def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tup
 def _apply_suppressions(findings: list[Finding], sources: dict[str, str], today: dt.date | None = None) -> None:
     today = today or dt.date.today()
     additions: list[Finding] = []
+    findings_by_location: dict[tuple[str, int], list[Finding]] = defaultdict(list)
+    for finding in findings:
+        findings_by_location[(finding.path, finding.line)].append(finding)
     for path, source in sorted(sources.items()):
         for line_number, line in enumerate(source.splitlines(), start=1):
             if not _SUPPRESSION_HINT_RE.search(line):
                 continue
-            same_line = [finding for finding in findings if finding.path == path and finding.line == line_number]
+            same_line = findings_by_location.get((path, line_number), [])
             if not same_line:
                 continue
             parsed = _parse_suppression(line)
@@ -1029,9 +1116,10 @@ def _apply_suppressions(findings: list[Finding], sources: dict[str, str], today:
             for target in targets:
                 target.suppressed = True
                 target.suppression = {
-                    "status": "accepted",
+                    "status": "metadata-valid",
                     "metadata_complete": True,
-                    "independent_approver": True,
+                    "approver_identifier_distinct": True,
+                    "approver_independence_verified": False,
                     "expires": expiry,
                     "values_redacted": True,
                 }
@@ -1094,7 +1182,10 @@ def render_text(report: Report) -> str:
             )
             lines.append(f"  Remediation: {finding.rule.remediation}")
             if finding.suppressed:
-                lines.append("  Suppression: validated metadata present; values redacted; release evidence unchanged.")
+                lines.append(
+                    "  Suppression: complete metadata and distinct approver identifier present; "
+                    "independence not verified; values redacted; release evidence unchanged."
+                )
     else:
         lines.append("Findings: none.")
     if report.tool_errors:
@@ -1161,8 +1252,8 @@ def render_sarif(report: Report) -> str:
             result["suppressions"] = [
                 {
                     "kind": "inSource",
-                    "status": "accepted",
-                    "justification": "Validated warning metadata is present; values are redacted and release evidence is unchanged.",
+                    "status": "underReview",
+                    "justification": "Complete warning metadata with distinct owner and approver identifiers is present; approver independence requires external verification, values are redacted, and release evidence is unchanged.",
                 }
             ]
         results.append(result)
