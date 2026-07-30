@@ -249,6 +249,7 @@ class Finding:
     line: int
     suppressed: bool = False
     suppression: dict[str, object] | None = None
+    source_id: bytes = dataclasses.field(default=b"", repr=False)
 
     @property
     def rule(self) -> Rule:
@@ -285,6 +286,7 @@ class Candidate:
     path: Path
     display_path: str
     tracked: bool | None
+    source_id: bytes = b""
 
 
 @dataclasses.dataclass
@@ -453,11 +455,11 @@ _GENERIC_ASSIGNMENT_RE = re.compile(
 )
 _CREDENTIAL_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s/:@]{1,128}:[^\s/@]{8,512}@")
 _PUBLIC_CLIENT_CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD)"
+    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
     r"\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
 )
 _SERVICE_ROLE_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
+    r"(?i)(?P<name>\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*)\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
 )
 _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\bALTER\s+TABLE(?:\s+IF\s+EXISTS)?\s+(?:ONLY\s+)?"
@@ -471,15 +473,18 @@ _FIREBASE_RTD_RULE_RE = re.compile(
     re.IGNORECASE,
 )
 _FIREBASE_ALLOW_RE = re.compile(
-    r"\ballow\s+(?:(?:read|write|create|update|delete|get|list)\s*,?\s*)+\s*:\s*if\s+true\s*;",
+    r"\ballow\s+(?:(?:read|write|create|update|delete|get|list)\s*,?\s*)+\s*:\s*if\s*\(?\s*"
+    r"(?:true(?:\s*==\s*true)?|false\s*==\s*false|1\s*==\s*1|!\s*false)\s*\)?\s*;",
     re.IGNORECASE,
 )
 _REMOTE_PIPE_RE = re.compile(
-    r"\b(?:curl|wget)\b[^|\r\n]{0,1000}\|\s*(?:(?:/[^/\s|]+)*/)?(?:ba|z|k|c)?sh\b",
+    r"\b(?:curl|wget)\b[^|;&]{0,1000}\|\s*"
+    r"(?:(?:(?:/[^/\s|]+)*/)?env(?:\s+(?:-[^\s|]+|[A-Za-z_][A-Za-z0-9_]*=[^\s|]+))*\s+)?"
+    r"(?:(?:/[^/\s|]+)*/)?(?:ba|z|k|c)?sh\b",
     re.IGNORECASE,
 )
 _ACTION_USES_RE = re.compile(
-    r"(?:^\s*-?\s*|[{,]\s*)uses\s*:\s*[\"']?(?P<reference>[^\s,}#\"']+)",
+    r"(?:^\s*-?\s*|[{,]\s*)[\"']?uses[\"']?\s*:\s*[\"']?(?P<reference>[^\s,}#\"']+)",
     re.IGNORECASE,
 )
 _SUPPRESSION_HINT_RE = re.compile(r"vibeworthy\s*:\s*(?:ignore|suppress)\b", re.IGNORECASE)
@@ -502,7 +507,7 @@ def _safe_display_component(value: str) -> str:
     for character in value:
         code = ord(character)
         if character == "\\":
-            output.append("/")
+            output.append("\\u005c")
         elif code < 32 or code == 127:
             output.append(f"\\x{code:02x}")
         elif 0xD800 <= code <= 0xDFFF:
@@ -521,6 +526,11 @@ def _safe_display_component(value: str) -> str:
     ):
         safe = pattern.sub("[REDACTED]", safe)
     safe = _CREDENTIAL_URL_RE.sub("[REDACTED-CREDENTIAL-URL]", safe)
+    for pattern in (_PUBLIC_CLIENT_CREDENTIAL_RE, _SERVICE_ROLE_ASSIGNMENT_RE):
+        safe = pattern.sub(
+            lambda match: f"{match.group('name')}=[REDACTED]",
+            safe,
+        )
     safe = _GENERIC_ASSIGNMENT_RE.sub(
         lambda match: f"{match.group('name')}=[REDACTED]",
         safe,
@@ -636,7 +646,7 @@ def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[
             raw_relative = os.fsdecode(encoded_path)
             candidate_path = git_root / raw_relative
             display = _relative_display(candidate_path, target_resolved, target_is_file)
-            by_raw_path[raw_relative] = Candidate(candidate_path, display, tracked)
+            by_raw_path[raw_relative] = Candidate(candidate_path, display, tracked, os.fsencode(raw_relative))
 
     report.scope = Scope(
         mode="git-worktree",
@@ -653,7 +663,7 @@ def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -
         excludes=["git-history", "submodules", "symlinks", "binary", "generated-or-vendor", "oversized"],
     )
     if target_is_file:
-        return [Candidate(target, _safe_display_component(target.name), None)]
+        return [Candidate(target, _safe_display_component(target.name), None, os.fsencode(target.name))]
 
     candidates: list[Candidate] = []
     errors: list[OSError] = []
@@ -676,7 +686,8 @@ def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -
         directory_names[:] = retained_directories
         for file_name in sorted(file_names):
             path = current_path / file_name
-            candidates.append(Candidate(path, _relative_display(path, target, False), None))
+            raw_relative = os.fspath(path.relative_to(target))
+            candidates.append(Candidate(path, _relative_display(path, target, False), None, os.fsencode(raw_relative)))
     if errors:
         report.tool_errors.append(ToolIssue("tool.walk", "One or more directories could not be enumerated safely."))
     return sorted(candidates, key=lambda candidate: candidate.display_path)
@@ -899,7 +910,14 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
     def add(rule_id: str, line_number: int) -> None:
         key = (rule_id, line_number)
         if key not in seen:
-            findings.append(Finding(rule_id, candidate.display_path, max(1, line_number)))
+            findings.append(
+                Finding(
+                    rule_id,
+                    candidate.display_path,
+                    max(1, line_number),
+                    source_id=candidate.source_id,
+                )
+            )
             seen.add(key)
 
     if _is_sensitive_env(candidate.path.name):
@@ -947,8 +965,6 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
             if not _placeholder(value) and not _is_known_specialized_value(value):
                 add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
 
-        if _REMOTE_PIPE_RE.search(line):
-            add("VW-REMOTE-INSTALL-SCRIPT", line_number)
         if workflow_file:
             for action_match in _ACTION_USES_RE.finditer(line):
                 if not _action_is_pinned(action_match.group("reference")):
@@ -963,6 +979,9 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
 
     if service_account_type_line is not None and service_account_private_line is not None:
         add("VW-FIREBASE-SERVICE-ACCOUNT", service_account_private_line)
+
+    for match in _REMOTE_PIPE_RE.finditer(text):
+        add("VW-REMOTE-INSTALL-SCRIPT", text.count("\n", 0, match.start()) + 1)
 
     if firebase_rule_file:
         for pattern in (_FIREBASE_RTD_RULE_RE, _FIREBASE_ALLOW_RE):
@@ -979,10 +998,20 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
         manifest = json.loads(text)
     except json.JSONDecodeError:
         add("VW-MANIFEST-INVALID", 1)
-        return {"valid": False, "path": candidate.display_path, "directory": candidate.path.parent}
+        return {
+            "valid": False,
+            "path": candidate.display_path,
+            "source_id": candidate.source_id,
+            "directory": candidate.path.parent,
+        }
     if not isinstance(manifest, dict):
         add("VW-MANIFEST-INVALID", 1)
-        return {"valid": False, "path": candidate.display_path, "directory": candidate.path.parent}
+        return {
+            "valid": False,
+            "path": candidate.display_path,
+            "source_id": candidate.source_id,
+            "directory": candidate.path.parent,
+        }
     scripts = manifest.get("scripts")
     if isinstance(scripts, dict):
         for name in ("preinstall", "install", "postinstall", "prepare"):
@@ -993,6 +1022,7 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
     return {
         "valid": True,
         "path": candidate.display_path,
+        "source_id": candidate.source_id,
         "directory": candidate.path.parent,
         "has_dependencies": has_dependencies,
     }
@@ -1027,13 +1057,28 @@ def _add_dependency_findings(
         distinct_names = {candidate.path.name for candidate in lockfiles}
         if len(distinct_names) > 1:
             first = sorted(lockfiles, key=lambda item: item.display_path)[0]
-            findings.append(Finding("VW-LOCKFILE-CONFLICT", first.display_path, 1))
+            findings.append(
+                Finding(
+                    "VW-LOCKFILE-CONFLICT",
+                    first.display_path,
+                    1,
+                    source_id=first.source_id,
+                )
+            )
     for manifest in manifests:
         if not manifest.get("valid") or not manifest.get("has_dependencies"):
             continue
         directory = manifest.get("directory")
         if isinstance(directory, Path) and not _nearest_lockfiles(directory, scan_root, lockfiles_by_directory):
-            findings.append(Finding("VW-LOCKFILE-MISSING", str(manifest["path"]), 1))
+            source_id = manifest.get("source_id")
+            findings.append(
+                Finding(
+                    "VW-LOCKFILE-MISSING",
+                    str(manifest["path"]),
+                    1,
+                    source_id=source_id if isinstance(source_id, bytes) else b"",
+                )
+            )
 
 
 def _parse_suppression(line: str) -> tuple[str, dict[str, str]] | None:
@@ -1084,34 +1129,43 @@ def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tup
     return True, expiry.isoformat()
 
 
-def _apply_suppressions(findings: list[Finding], sources: dict[str, str], today: dt.date | None = None) -> None:
+def _apply_suppressions(findings: list[Finding], sources: dict[bytes, str], today: dt.date | None = None) -> None:
     today = today or dt.date.today()
     additions: list[Finding] = []
-    findings_by_location: dict[tuple[str, int], list[Finding]] = defaultdict(list)
+    findings_by_location: dict[tuple[bytes, int], list[Finding]] = defaultdict(list)
     for finding in findings:
-        findings_by_location[(finding.path, finding.line)].append(finding)
-    for path, source in sorted(sources.items()):
+        findings_by_location[(finding.source_id, finding.line)].append(finding)
+    for source_id, source in sorted(sources.items()):
         for line_number, line in enumerate(source.splitlines(), start=1):
             if not _SUPPRESSION_HINT_RE.search(line):
                 continue
-            same_line = findings_by_location.get((path, line_number), [])
+            same_line = findings_by_location.get((source_id, line_number), [])
             if not same_line:
                 continue
+            path = same_line[0].path
             parsed = _parse_suppression(line)
             if parsed is None:
-                additions.append(Finding("VW-SUPPRESSION-INVALID", path, line_number))
+                additions.append(
+                    Finding("VW-SUPPRESSION-INVALID", path, line_number, source_id=source_id)
+                )
                 continue
             target_rule, metadata = parsed
             targets = [finding for finding in same_line if finding.rule_id == target_rule]
             if not targets:
-                additions.append(Finding("VW-SUPPRESSION-INVALID", path, line_number))
+                additions.append(
+                    Finding("VW-SUPPRESSION-INVALID", path, line_number, source_id=source_id)
+                )
                 continue
             if any(target.rule.severity == BLOCKER for target in targets):
-                additions.append(Finding("VW-SUPPRESSION-BLOCKER", path, line_number))
+                additions.append(
+                    Finding("VW-SUPPRESSION-BLOCKER", path, line_number, source_id=source_id)
+                )
                 continue
             valid, expiry = _valid_suppression_metadata(metadata, today)
             if not valid:
-                additions.append(Finding("VW-SUPPRESSION-INVALID", path, line_number))
+                additions.append(
+                    Finding("VW-SUPPRESSION-INVALID", path, line_number, source_id=source_id)
+                )
                 continue
             for target in targets:
                 target.suppressed = True
@@ -1141,22 +1195,22 @@ def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FI
         report.tool_errors.append(ToolIssue("tool.file-limit", "The candidate-file limit was exceeded; no partial clean result was produced."))
         return report
 
-    sources: dict[str, str] = {}
+    sources: dict[bytes, str] = {}
     manifests: list[dict[str, object]] = []
     for candidate in candidates:
         text = _read_candidate(candidate, scan_root, root_is_file, max_file_bytes, report)
         if text is None:
             continue
-        sources[candidate.display_path] = text
+        sources[candidate.source_id] = text
         manifest = _scan_text(candidate, text, report.findings)
         if manifest is not None:
             manifests.append(manifest)
 
     _add_dependency_findings(candidates, manifests, scan_root, root_is_file, report.findings)
     _apply_suppressions(report.findings, sources)
-    unique: dict[tuple[str, str, int], Finding] = {}
+    unique: dict[tuple[str, bytes, int], Finding] = {}
     for finding in report.findings:
-        key = (finding.rule_id, finding.path, finding.line)
+        key = (finding.rule_id, finding.source_id, finding.line)
         existing = unique.get(key)
         if existing is None or (finding.suppressed and not existing.suppressed):
             unique[key] = finding
