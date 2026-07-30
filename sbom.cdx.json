@@ -1,0 +1,41 @@
+{
+  "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:ee0edc31-173c-4efa-89f5-373508903bca",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-07-30T17:12:18Z",
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:github/dimidotdev/vibeworthy@1.0.0",
+      "name": "vibeworthy",
+      "version": "1.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:github/dimidotdev/vibeworthy@1.0.0"
+    },
+    "properties": [
+      {
+        "name": "vibeworthy:runtime-dependencies",
+        "value": "none; the scanner uses only the Python 3.11 standard library"
+      },
+      {
+        "name": "vibeworthy:scope",
+        "value": "Agent Skill Markdown, templates, references, and a dependency-free local scanner"
+      }
+    ]
+  },
+  "components": [],
+  "dependencies": [
+    {
+      "ref": "pkg:github/dimidotdev/vibeworthy@1.0.0",
+      "dependsOn": []
+    }
+  ]
+}

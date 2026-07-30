@@ -1,0 +1,4 @@
+interface:
+  display_name: "VibeWorthy"
+  short_description: "Market, engineering, and security guardrails"
+  default_prompt: "Use $vibeworthy to turn this AI-assisted app idea into a valuable, maintainable, and safe-to-ship product."

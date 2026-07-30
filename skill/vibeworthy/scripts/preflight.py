@@ -1,0 +1,1275 @@
+#!/usr/bin/env python3
+"""Local, read-only preflight checks for a VibeWorthy worktree.
+
+The scanner deliberately reports rule, location, and remediation without retaining
+or rendering matched values.  It does not execute project code, contact a network,
+scan Git history, inspect submodule contents, or claim that a clean run is a release
+approval.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import dataclasses
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import stat
+import subprocess
+import sys
+from collections import Counter
+from typing import Iterable, Sequence
+from urllib.parse import quote
+
+
+TOOL_NAME = "vibeworthy-preflight"
+TOOL_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.0"
+DEFAULT_MAX_FILE_BYTES = 1_048_576
+DEFAULT_MAX_FILES = 20_000
+
+BLOCKER = "blocker"
+WARNING = "warning"
+REQUIRED_MANUAL_CHECK = "required-manual-check"
+
+
+@dataclasses.dataclass(frozen=True)
+class Rule:
+    rule_id: str
+    severity: str
+    title: str
+    message: str
+    remediation: str
+    category: str
+
+
+def _rule(
+    rule_id: str,
+    severity: str,
+    title: str,
+    message: str,
+    remediation: str,
+    category: str,
+) -> Rule:
+    return Rule(rule_id, severity, title, message, remediation, category)
+
+
+RULES: dict[str, Rule] = {
+    rule.rule_id: rule
+    for rule in (
+        _rule(
+            "VW-SECRET-PRIVATE-KEY",
+            BLOCKER,
+            "Private key material",
+            "Private key material is present in the current worktree.",
+            "Revoke or rotate it first, audit use, remediate Git history, and move the replacement to a managed secret store with least privilege, an owner, inventory, and expiry.",
+            "suspected-secret",
+        ),
+        _rule(
+            "VW-SECRET-CLOUD-ACCESS-KEY",
+            BLOCKER,
+            "Cloud access credential",
+            "A high-confidence cloud access credential pattern is present in the current worktree.",
+            "Revoke or rotate it first, audit use, remediate Git history, and provision a least-privileged short-lived identity through a managed secret store.",
+            "suspected-secret",
+        ),
+        _rule(
+            "VW-SECRET-PROVIDER-TOKEN",
+            BLOCKER,
+            "Provider credential",
+            "A high-confidence provider credential pattern is present in the current worktree.",
+            "Revoke or rotate it first, audit use, remediate Git history, and provision the replacement outside source and client bundles.",
+            "suspected-secret",
+        ),
+        _rule(
+            "VW-SECRET-GENERIC-ASSIGNMENT",
+            BLOCKER,
+            "Credential-like assignment",
+            "A non-placeholder credential-like value is assigned in source or configuration.",
+            "Treat it as exposed until disproven: revoke or rotate, audit use and history, then use a managed secret store with least privilege, owner, inventory, and expiry.",
+            "suspected-secret",
+        ),
+        _rule(
+            "VW-SECRET-CREDENTIAL-URL",
+            BLOCKER,
+            "Credential in URL",
+            "A URL appears to contain embedded credentials.",
+            "Revoke or rotate the credential, remove it from source and history, and supply authentication through a managed secret mechanism.",
+            "suspected-secret",
+        ),
+        _rule(
+            "VW-ENV-TRACKED",
+            BLOCKER,
+            "Tracked sensitive environment file",
+            "A sensitive environment file is tracked by Git.",
+            "Remove the file from tracking without printing it, rotate any exposed values, audit and remediate history, and retain only a placeholder template.",
+            "environment",
+        ),
+        _rule(
+            "VW-ENV-UNIGNORED",
+            BLOCKER,
+            "Unignored sensitive environment file",
+            "A sensitive environment file is untracked but not ignored.",
+            "Add a narrowly scoped ignore rule, keep a placeholder template, and rotate any value that may already have been shared or staged.",
+            "environment",
+        ),
+        _rule(
+            "VW-CLIENT-PRIVILEGED-CREDENTIAL",
+            BLOCKER,
+            "Privileged credential in public client configuration",
+            "A public-client variable appears to contain a privileged credential.",
+            "Remove it from the client, rotate it, and enforce the privileged operation at a reviewed server or IAM boundary with independent denial tests.",
+            "client-secret",
+        ),
+        _rule(
+            "VW-FIREBASE-PUBLIC-API-KEY",
+            WARNING,
+            "Firebase-style client API key",
+            "A Firebase-style client API key is present; its external API and application restrictions are unverified.",
+            "Do not treat the identifier as authorization. Manually verify cloud restrictions, deny-by-default Rules, App Check where appropriate, and anonymous/user-A/user-B/admin denial evidence.",
+            REQUIRED_MANUAL_CHECK,
+        ),
+        _rule(
+            "VW-FIREBASE-SERVICE-ACCOUNT",
+            BLOCKER,
+            "Firebase service-account credential",
+            "A Firebase service-account credential pattern is present in the current worktree.",
+            "Revoke or rotate the credential, audit use and history, and replace it with a least-privileged server-side workload identity where supported.",
+            "privileged-backend-credential",
+        ),
+        _rule(
+            "VW-SUPABASE-PUBLIC-KEY",
+            WARNING,
+            "Supabase public client key",
+            "A Supabase publishable or legacy anonymous key is present; RLS and external project controls are unverified.",
+            "Manually verify RLS, USING and WITH CHECK behavior, and anonymous/user-A/user-B/admin denial across applicable tables, storage, realtime, views, and functions.",
+            REQUIRED_MANUAL_CHECK,
+        ),
+        _rule(
+            "VW-SUPABASE-PRIVILEGED-KEY",
+            BLOCKER,
+            "Supabase privileged key",
+            "A Supabase secret or service-role credential pattern is present in the current worktree.",
+            "Revoke or rotate it, remove it from public clients and history, and test authorization at the privileged server or IAM boundary.",
+            "privileged-backend-credential",
+        ),
+        _rule(
+            "VW-SUPABASE-RLS-DISABLED",
+            BLOCKER,
+            "Supabase row-level security disabled",
+            "A SQL migration explicitly disables PostgreSQL row-level security on a table.",
+            "Keep RLS enabled and deny by default; review bypass roles and prove anonymous/user-A/user-B/admin USING and WITH CHECK behavior in isolated staging.",
+            "authorization",
+        ),
+        _rule(
+            "VW-FIREBASE-PERMISSIVE-RULE",
+            BLOCKER,
+            "Unconditional Firebase access rule",
+            "A Firebase Security Rule appears to allow an operation unconditionally.",
+            "Replace it with deny-by-default authorization and prove anonymous/user-A/user-B/admin behavior in an isolated emulator or staging project.",
+            "authorization",
+        ),
+        _rule(
+            "VW-LOCKFILE-CONFLICT",
+            BLOCKER,
+            "Conflicting lockfiles",
+            "More than one JavaScript package-manager lockfile applies in the same project directory.",
+            "Defer installation, confirm package-manager identity and necessity, then preserve one reviewed immutable lockfile.",
+            "dependency-integrity",
+        ),
+        _rule(
+            "VW-LOCKFILE-MISSING",
+            WARNING,
+            "Dependency manifest without lockfile",
+            "A JavaScript dependency manifest has dependencies but no applicable lockfile in scope.",
+            "Confirm package identity and necessity, then generate and review one immutable lockfile without running untrusted install hooks.",
+            "dependency-integrity",
+        ),
+        _rule(
+            "VW-INSTALL-SCRIPT",
+            WARNING,
+            "Package install lifecycle script",
+            "A package install lifecycle script can execute code during dependency installation.",
+            "Defer installation until the package, source, permissions, necessity, and script behavior have been independently reviewed.",
+            "dependency-execution",
+        ),
+        _rule(
+            "VW-REMOTE-INSTALL-SCRIPT",
+            BLOCKER,
+            "Remote script execution",
+            "A command appears to pipe remotely retrieved content into a command interpreter.",
+            "Do not execute it. Verify identity, source, digest or signature, permissions, and necessity through a reviewable download-and-inspect workflow.",
+            "dependency-execution",
+        ),
+        _rule(
+            "VW-AUTOMATION-UNPINNED",
+            BLOCKER,
+            "Unpinned third-party automation",
+            "A third-party workflow action or container is not pinned to an immutable commit or digest.",
+            "Pin actions to a reviewed full commit SHA and containers to a verified digest; record provenance and update ownership.",
+            "supply-chain",
+        ),
+        _rule(
+            "VW-MANIFEST-INVALID",
+            BLOCKER,
+            "Invalid dependency manifest",
+            "A dependency manifest could not be parsed as a JSON object.",
+            "Repair and review the manifest before dependency installation or release checks.",
+            "dependency-integrity",
+        ),
+        _rule(
+            "VW-SUPPRESSION-INVALID",
+            BLOCKER,
+            "Invalid warning suppression",
+            "A warning suppression is missing valid, independent, or future-dated approval metadata.",
+            "Keep the warning active or provide nonempty reason, owner, independent approved-by, compensating-control, and a future ISO expiry date on the same line.",
+            "scanner-policy",
+        ),
+        _rule(
+            "VW-SUPPRESSION-BLOCKER",
+            BLOCKER,
+            "Blocker suppression attempt",
+            "An inline marker attempts to suppress a blocker, which is not permitted.",
+            "Resolve the blocker and retain evidence; blocker and tool-error results cannot be suppressed or waived by this scanner.",
+            "scanner-policy",
+        ),
+    )
+}
+
+
+@dataclasses.dataclass
+class Finding:
+    rule_id: str
+    path: str
+    line: int
+    suppressed: bool = False
+    suppression: dict[str, object] | None = None
+
+    @property
+    def rule(self) -> Rule:
+        return RULES[self.rule_id]
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "rule_id": self.rule_id,
+            "severity": self.rule.severity,
+            "path": self.path,
+            "line": self.line,
+            "message": self.rule.message,
+            "remediation": self.rule.remediation,
+            "evidence_category": self.rule.category,
+            "suppressed": self.suppressed,
+        }
+        if self.suppression is not None:
+            result["suppression"] = self.suppression
+        return result
+
+
+@dataclasses.dataclass(frozen=True)
+class ToolIssue:
+    code: str
+    message: str
+    path: str = "."
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message, "path": self.path}
+
+
+@dataclasses.dataclass(frozen=True)
+class Candidate:
+    path: Path
+    display_path: str
+    tracked: bool | None
+
+
+@dataclasses.dataclass
+class Scope:
+    mode: str = "not-started"
+    target: str = "."
+    includes: list[str] = dataclasses.field(default_factory=list)
+    excludes: list[str] = dataclasses.field(default_factory=list)
+    git_history_scanned: bool = False
+    submodules_scanned: bool = False
+    network_used: bool = False
+    files_modified: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass
+class Report:
+    scope: Scope = dataclasses.field(default_factory=Scope)
+    findings: list[Finding] = dataclasses.field(default_factory=list)
+    tool_errors: list[ToolIssue] = dataclasses.field(default_factory=list)
+    files_considered: int = 0
+    files_scanned: int = 0
+    skipped: Counter[str] = dataclasses.field(default_factory=Counter)
+
+    @property
+    def exit_code(self) -> int:
+        if self.tool_errors:
+            return 2
+        if any(f.rule.severity == BLOCKER for f in self.findings):
+            return 1
+        return 0
+
+    def summary(self) -> dict[str, object]:
+        blockers = sum(f.rule.severity == BLOCKER for f in self.findings)
+        warnings = sum(f.rule.severity == WARNING for f in self.findings)
+        suppressed = sum(f.suppressed for f in self.findings)
+        manual = sum(f.rule.category == REQUIRED_MANUAL_CHECK for f in self.findings)
+        return {
+            "files_considered": self.files_considered,
+            "files_scanned": self.files_scanned,
+            "files_skipped": sum(self.skipped.values()),
+            "skipped_by_reason": dict(sorted(self.skipped.items())),
+            "findings_total": len(self.findings),
+            "blockers": blockers,
+            "warnings": warnings,
+            "active_warnings": warnings - suppressed,
+            "suppressed_warnings": suppressed,
+            "required_manual_checks": manual,
+            "tool_errors": len(self.tool_errors),
+        }
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "tool": {"name": TOOL_NAME, "version": TOOL_VERSION},
+            "scope": self.scope.as_dict(),
+            "findings": [finding.as_dict() for finding in self.findings],
+            "tool_errors": [issue.as_dict() for issue in self.tool_errors],
+            "summary": self.summary(),
+            "exit_code": self.exit_code,
+            "release_assertion": "none",
+        }
+
+
+class UsageFailure(Exception):
+    """An argument error that must not echo untrusted argument content."""
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # noqa: ARG002 - intentionally redacted
+        raise UsageFailure
+
+
+_SKIP_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".cache",
+        ".next",
+        ".nuxt",
+        ".output",
+        ".parcel-cache",
+        ".pytest_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "bower_components",
+        "build",
+        "coverage",
+        "dist",
+        "generated",
+        "node_modules",
+        "out",
+        "target",
+        "vendor",
+        "venv",
+    }
+)
+
+_BINARY_SUFFIXES = frozenset(
+    {
+        ".7z",
+        ".a",
+        ".avi",
+        ".bin",
+        ".bmp",
+        ".class",
+        ".dll",
+        ".dylib",
+        ".eot",
+        ".exe",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jar",
+        ".jpeg",
+        ".jpg",
+        ".lockb",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".o",
+        ".otf",
+        ".pdf",
+        ".png",
+        ".pyc",
+        ".so",
+        ".tar",
+        ".tgz",
+        ".ttf",
+        ".wav",
+        ".webm",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".xz",
+        ".zip",
+    }
+)
+
+_LOCKFILES = frozenset(
+    {"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"}
+)
+
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----")
+_CLOUD_KEY_RE = re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
+_PROVIDER_TOKEN_RES = (
+    re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36,255}(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])sk_live_[A-Za-z0-9]{20,255}(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{20,255}(?![A-Za-z0-9])"),
+)
+_FIREBASE_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])AIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9_-])")
+_SUPABASE_PUBLIC_RE = re.compile(r"(?<![A-Za-z0-9_-])sb_publishable_[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])")
+_SUPABASE_SECRET_RE = re.compile(r"(?<![A-Za-z0-9_-])sb_secret_[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])")
+_JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,2048}\.[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{5,2048}(?![A-Za-z0-9_-])")
+_GENERIC_ASSIGNMENT_RE = re.compile(
+    r"(?i)(?P<name>[A-Z0-9_.\"'-]*(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|access[_-]?key)[A-Z0-9_.\"'-]*)"
+    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})(?P=quote)"
+)
+_CREDENTIAL_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s/:@]{1,128}:[^\s/@]{8,512}@")
+_PUBLIC_CLIENT_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]*(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD)"
+    r"\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
+)
+_SERVICE_ROLE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b[A-Z0-9_]*SUPABASE[A-Z0-9_]*SERVICE_ROLE[A-Z0-9_]*\s*[:=]\s*[\"']?(?P<value>[A-Za-z0-9_./+=:@%$-]{12,4096})"
+)
+_SUPABASE_RLS_DISABLED_RE = re.compile(
+    r"\bALTER\s+TABLE(?:\s+IF\s+EXISTS)?\s+(?:ONLY\s+)?"
+    r"(?:\"[^\"\r\n]+\"|[A-Za-z_][A-Za-z0-9_$]*)"
+    r"(?:\s*\.\s*(?:\"[^\"\r\n]+\"|[A-Za-z_][A-Za-z0-9_$]*))?"
+    r"\s+DISABLE\s+ROW\s+LEVEL\s+SECURITY\b",
+    re.IGNORECASE,
+)
+_FIREBASE_RTD_RULE_RE = re.compile(r"[\"']?\.(?:read|write)[\"']?\s*:\s*(?:true|[\"']true[\"'])", re.IGNORECASE)
+_FIREBASE_ALLOW_RE = re.compile(
+    r"\ballow\s+(?:(?:read|write|create|update|delete|get|list)\s*,?\s*)+\s*:\s*if\s+true\s*;",
+    re.IGNORECASE,
+)
+_REMOTE_PIPE_RE = re.compile(r"\b(?:curl|wget)\b[^|\r\n]{0,1000}\|\s*(?:ba|z|k|c)?sh\b", re.IGNORECASE)
+_ACTION_USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*[\"']?(?P<reference>[^\s#\"']+)", re.IGNORECASE)
+_SUPPRESSION_HINT_RE = re.compile(r"vibeworthy\s*:\s*(?:ignore|suppress)\b", re.IGNORECASE)
+_SUPPRESSION_RE = re.compile(
+    r"vibeworthy\s*:\s*(?:ignore|suppress)\s+(?:\[)?(?P<rule>[A-Za-z0-9._-]+)(?:\])?(?P<meta>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _contains_path(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_display_component(value: str) -> str:
+    output: list[str] = []
+    for character in value:
+        code = ord(character)
+        if character == "\\":
+            output.append("/")
+        elif code < 32 or code == 127:
+            output.append(f"\\x{code:02x}")
+        elif 0xD800 <= code <= 0xDFFF:
+            output.append(f"\\u{code:04x}")
+        else:
+            output.append(character)
+    safe = "".join(output)
+    for pattern in (_PRIVATE_KEY_RE, _CLOUD_KEY_RE, _FIREBASE_KEY_RE, _SUPABASE_PUBLIC_RE, _SUPABASE_SECRET_RE, _JWT_RE, *_PROVIDER_TOKEN_RES):
+        safe = pattern.sub("[REDACTED]", safe)
+    return safe or "."
+
+
+def _relative_display(path: Path, root: Path, root_is_file: bool) -> str:
+    if root_is_file:
+        raw = path.name
+    else:
+        try:
+            raw = path.relative_to(root).as_posix()
+        except ValueError:
+            raw = "."
+    return _safe_display_component(raw)
+
+
+def _is_env_template(name: str) -> bool:
+    lower = name.lower()
+    template_parts = (".example", ".sample", ".template", ".dist", ".defaults")
+    return lower.startswith(".env") and any(part in lower for part in template_parts)
+
+
+def _is_sensitive_env(name: str) -> bool:
+    lower = name.lower()
+    return (lower == ".env" or lower.startswith(".env.")) and not _is_env_template(lower)
+
+
+def _skip_path_reason(display_path: str) -> str | None:
+    path = Path(display_path)
+    lowered_parts = {part.lower() for part in path.parts[:-1]}
+    if lowered_parts & _SKIP_DIR_NAMES:
+        return "generated-or-vendor"
+    lower_name = path.name.lower()
+    if lower_name.endswith((".min.js", ".min.css", ".map")) or ".generated." in lower_name:
+        return "generated-or-vendor"
+    if path.suffix.lower() in _BINARY_SUFFIXES:
+        return "binary"
+    return None
+
+
+def _run_git(cwd: Path, arguments: Sequence[str]) -> tuple[int, bytes]:
+    environment = os.environ.copy()
+    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        completed = subprocess.run(
+            ["git", "-c", "core.quotepath=false", *arguments],
+            cwd=os.fspath(cwd),
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("git-unavailable") from exc
+    return completed.returncode, completed.stdout
+
+
+def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[Candidate] | None:
+    probe = target.parent if target_is_file else target
+    try:
+        return_code, root_output = _run_git(probe, ["rev-parse", "--show-toplevel"])
+    except RuntimeError:
+        report.tool_errors.append(ToolIssue("tool.git-unavailable", "Git could not be invoked safely."))
+        return []
+    if return_code != 0:
+        return None
+
+    try:
+        git_root = Path(os.fsdecode(root_output.rstrip(b"\r\n"))).resolve(strict=True)
+    except (OSError, ValueError):
+        report.tool_errors.append(ToolIssue("tool.git-root", "The Git worktree root could not be resolved safely."))
+        return []
+    target_resolved = target.resolve(strict=True)
+    if not _contains_path(git_root, target_resolved):
+        report.tool_errors.append(ToolIssue("tool.scope", "The requested target is outside the resolved Git worktree."))
+        return []
+
+    pathspec = target_resolved.relative_to(git_root).as_posix() or "."
+    commands = (
+        (True, ["ls-files", "-z", "--cached", "--", pathspec]),
+        (False, ["ls-files", "-z", "--others", "--exclude-standard", "--", pathspec]),
+    )
+    by_raw_path: dict[str, Candidate] = {}
+    for tracked, command in commands:
+        try:
+            return_code, output = _run_git(git_root, command)
+        except RuntimeError:
+            report.tool_errors.append(ToolIssue("tool.git-enumeration", "Git worktree enumeration failed."))
+            return []
+        if return_code != 0:
+            report.tool_errors.append(ToolIssue("tool.git-enumeration", "Git worktree enumeration failed."))
+            return []
+        for encoded_path in output.split(b"\0"):
+            if not encoded_path:
+                continue
+            raw_relative = os.fsdecode(encoded_path)
+            candidate_path = git_root / raw_relative
+            display = _relative_display(candidate_path, target_resolved, target_is_file)
+            by_raw_path[raw_relative] = Candidate(candidate_path, display, tracked)
+
+    report.scope = Scope(
+        mode="git-worktree",
+        includes=["tracked", "untracked-non-ignored"],
+        excludes=["git-history", "submodules", "ignored", "symlinks", "binary", "generated-or-vendor", "oversized"],
+    )
+    return sorted(by_raw_path.values(), key=lambda candidate: candidate.display_path)
+
+
+def _filesystem_candidates(target: Path, target_is_file: bool, report: Report) -> list[Candidate]:
+    report.scope = Scope(
+        mode="filesystem",
+        includes=["regular-files"],
+        excludes=["git-history", "submodules", "symlinks", "binary", "generated-or-vendor", "oversized"],
+    )
+    if target_is_file:
+        return [Candidate(target, _safe_display_component(target.name), None)]
+
+    candidates: list[Candidate] = []
+    errors: list[OSError] = []
+
+    def remember_error(error: OSError) -> None:
+        errors.append(error)
+
+    for current, directory_names, file_names in os.walk(target, topdown=True, followlinks=False, onerror=remember_error):
+        current_path = Path(current)
+        retained_directories: list[str] = []
+        for directory_name in sorted(directory_names):
+            directory_path = current_path / directory_name
+            display = _relative_display(directory_path, target, False)
+            if directory_name.lower() in _SKIP_DIR_NAMES:
+                report.skipped["generated-or-vendor"] += 1
+            elif directory_path.is_symlink():
+                report.skipped["symlink"] += 1
+            else:
+                retained_directories.append(directory_name)
+        directory_names[:] = retained_directories
+        for file_name in sorted(file_names):
+            path = current_path / file_name
+            candidates.append(Candidate(path, _relative_display(path, target, False), None))
+    if errors:
+        report.tool_errors.append(ToolIssue("tool.walk", "One or more directories could not be enumerated safely."))
+    return sorted(candidates, key=lambda candidate: candidate.display_path)
+
+
+def _enumerate_candidates(target: Path, report: Report) -> tuple[list[Candidate], Path, bool]:
+    try:
+        target_stat = os.lstat(target)
+    except (OSError, ValueError):
+        report.tool_errors.append(ToolIssue("tool.target", "The requested target could not be accessed safely."))
+        return [], target, False
+    if stat.S_ISLNK(target_stat.st_mode):
+        report.tool_errors.append(ToolIssue("tool.target-symlink", "A symlink cannot be used as the scan root."))
+        return [], target, False
+    target_is_file = stat.S_ISREG(target_stat.st_mode)
+    if not target_is_file and not stat.S_ISDIR(target_stat.st_mode):
+        report.tool_errors.append(ToolIssue("tool.target-type", "The scan root must be a regular file or directory."))
+        return [], target, False
+    try:
+        resolved = target.resolve(strict=True)
+    except OSError:
+        report.tool_errors.append(ToolIssue("tool.target", "The requested target could not be resolved safely."))
+        return [], target, target_is_file
+
+    candidates = _git_candidates(resolved, target_is_file, report)
+    if candidates is None:
+        candidates = _filesystem_candidates(resolved, target_is_file, report)
+    return candidates, resolved, target_is_file
+
+
+def _read_candidate(candidate: Candidate, scan_root: Path, root_is_file: bool, max_bytes: int, report: Report) -> str | None:
+    skip_reason = _skip_path_reason(candidate.display_path)
+    if skip_reason:
+        report.skipped[skip_reason] += 1
+        return None
+    try:
+        file_stat = os.lstat(candidate.path)
+    except FileNotFoundError:
+        report.skipped["missing-from-worktree"] += 1
+        return None
+    except OSError:
+        report.tool_errors.append(ToolIssue("tool.file-metadata", "A candidate file could not be inspected safely.", candidate.display_path))
+        return None
+    if stat.S_ISLNK(file_stat.st_mode):
+        report.skipped["symlink"] += 1
+        return None
+    if stat.S_ISDIR(file_stat.st_mode):
+        report.skipped["submodule-or-directory"] += 1
+        return None
+    if not stat.S_ISREG(file_stat.st_mode):
+        report.skipped["special-file"] += 1
+        return None
+    if file_stat.st_size > max_bytes:
+        report.skipped["oversized"] += 1
+        return None
+    try:
+        resolved = candidate.path.resolve(strict=True)
+    except OSError:
+        report.tool_errors.append(ToolIssue("tool.file-resolution", "A candidate file could not be resolved safely.", candidate.display_path))
+        return None
+    allowed_root = scan_root.parent if root_is_file else scan_root
+    if not _contains_path(allowed_root, resolved) or (root_is_file and resolved != scan_root):
+        report.skipped["outside-scope"] += 1
+        return None
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate.path, flags)
+        try:
+            opened_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                report.skipped["special-file"] += 1
+                return None
+            chunks: list[bytes] = []
+            remaining = max_bytes + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        report.tool_errors.append(ToolIssue("tool.file-read", "A candidate file could not be read safely.", candidate.display_path))
+        return None
+    if len(content) > max_bytes:
+        report.skipped["oversized"] += 1
+        return None
+    if b"\0" in content:
+        report.skipped["binary"] += 1
+        return None
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        report.skipped["binary"] += 1
+        return None
+    report.files_scanned += 1
+    return text
+
+
+def _placeholder(value: str) -> bool:
+    lowered = value.strip().lower()
+    markers = (
+        "${",
+        "{{",
+        "<",
+        "changeme",
+        "dummy",
+        "example",
+        "fake",
+        "placeholder",
+        "process.env",
+        "replace",
+        "test-only",
+        "your_",
+        "your-",
+    )
+    return not lowered or any(marker in lowered for marker in markers)
+
+
+def _jwt_role(value: str) -> str | None:
+    try:
+        payload = value.split(".", 2)[1]
+        padding = "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode((payload + padding).encode("ascii"))
+        if len(decoded) > 16_384:
+            return None
+        data = json.loads(decoded.decode("utf-8"))
+        role = data.get("role") if isinstance(data, dict) else None
+        return role if isinstance(role, str) else None
+    except (ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _is_known_specialized_value(value: str) -> bool:
+    if (
+        _FIREBASE_KEY_RE.fullmatch(value)
+        or _SUPABASE_PUBLIC_RE.fullmatch(value)
+        or _SUPABASE_SECRET_RE.fullmatch(value)
+        or _CLOUD_KEY_RE.fullmatch(value)
+        or any(pattern.fullmatch(value) for pattern in _PROVIDER_TOKEN_RES)
+    ):
+        return True
+    if _JWT_RE.fullmatch(value) and _jwt_role(value) in {"anon", "service_role"}:
+        return True
+    return False
+
+
+def _line_for_json_key(lines: Sequence[str], key: str) -> int:
+    pattern = re.compile(rf"^\s*[\"']{re.escape(key)}[\"']\s*:")
+    for index, line in enumerate(lines, start=1):
+        if pattern.search(line):
+            return index
+    return 1
+
+
+def _is_firebase_rules_path(display_path: str) -> bool:
+    lower = display_path.lower()
+    name = Path(lower).name
+    return name in {"firestore.rules", "storage.rules", "database.rules.json", "firebase.rules"} or lower.endswith(".rules")
+
+
+def _is_workflow_path(display_path: str) -> bool:
+    lower = display_path.lower()
+    return lower.startswith(".github/workflows/") and lower.endswith((".yml", ".yaml"))
+
+
+def _action_is_pinned(reference: str) -> bool:
+    if reference.startswith("./"):
+        return True
+    if reference.startswith("docker://"):
+        return "@sha256:" in reference.lower() and bool(re.search(r"@sha256:[0-9a-f]{64}$", reference, re.IGNORECASE))
+    if "@" not in reference:
+        return False
+    revision = reference.rsplit("@", 1)[1]
+    return bool(re.fullmatch(r"[0-9a-fA-F]{40}", revision))
+
+
+def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict[str, object] | None:
+    lines = text.splitlines()
+    seen: set[tuple[str, int]] = set()
+
+    def add(rule_id: str, line_number: int) -> None:
+        key = (rule_id, line_number)
+        if key not in seen:
+            findings.append(Finding(rule_id, candidate.display_path, max(1, line_number)))
+            seen.add(key)
+
+    if _is_sensitive_env(candidate.path.name):
+        if candidate.tracked is True:
+            add("VW-ENV-TRACKED", 1)
+        elif candidate.tracked is False:
+            add("VW-ENV-UNIGNORED", 1)
+
+    firebase_rule_file = _is_firebase_rules_path(candidate.display_path)
+    workflow_file = _is_workflow_path(candidate.display_path)
+    service_account_type_line: int | None = None
+    service_account_private_line: int | None = None
+
+    for line_number, line in enumerate(lines, start=1):
+        if _PRIVATE_KEY_RE.search(line):
+            add("VW-SECRET-PRIVATE-KEY", line_number)
+        if _CLOUD_KEY_RE.search(line):
+            add("VW-SECRET-CLOUD-ACCESS-KEY", line_number)
+        if any(pattern.search(line) for pattern in _PROVIDER_TOKEN_RES):
+            add("VW-SECRET-PROVIDER-TOKEN", line_number)
+        if _CREDENTIAL_URL_RE.search(line):
+            add("VW-SECRET-CREDENTIAL-URL", line_number)
+        if _FIREBASE_KEY_RE.search(line):
+            add("VW-FIREBASE-PUBLIC-API-KEY", line_number)
+        if _SUPABASE_PUBLIC_RE.search(line):
+            add("VW-SUPABASE-PUBLIC-KEY", line_number)
+        if _SUPABASE_SECRET_RE.search(line):
+            add("VW-SUPABASE-PRIVILEGED-KEY", line_number)
+        for jwt_match in _JWT_RE.finditer(line):
+            role = _jwt_role(jwt_match.group(0))
+            if role == "service_role":
+                add("VW-SUPABASE-PRIVILEGED-KEY", line_number)
+            elif role == "anon":
+                add("VW-SUPABASE-PUBLIC-KEY", line_number)
+
+        public_client_match = _PUBLIC_CLIENT_CREDENTIAL_RE.search(line)
+        if public_client_match and not _placeholder(public_client_match.group("value")):
+            add("VW-CLIENT-PRIVILEGED-CREDENTIAL", line_number)
+        service_role_match = _SERVICE_ROLE_ASSIGNMENT_RE.search(line)
+        if service_role_match and not _placeholder(service_role_match.group("value")):
+            add("VW-SUPABASE-PRIVILEGED-KEY", line_number)
+
+        for assignment in _GENERIC_ASSIGNMENT_RE.finditer(line):
+            value = assignment.group("value")
+            if not _placeholder(value) and not _is_known_specialized_value(value):
+                add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
+
+        if firebase_rule_file and (_FIREBASE_RTD_RULE_RE.search(line) or _FIREBASE_ALLOW_RE.search(line)):
+            add("VW-FIREBASE-PERMISSIVE-RULE", line_number)
+        if _REMOTE_PIPE_RE.search(line):
+            add("VW-REMOTE-INSTALL-SCRIPT", line_number)
+        if workflow_file:
+            action_match = _ACTION_USES_RE.search(line)
+            if action_match and not _action_is_pinned(action_match.group("reference")):
+                add("VW-AUTOMATION-UNPINNED", line_number)
+
+        if re.search(r"[\"']type[\"']\s*:\s*[\"']service_account[\"']", line):
+            service_account_type_line = line_number
+        if re.search(r"[\"']private_key[\"']\s*:", line) and not re.search(
+            r"(?i)(?:placeholder|example|replace|dummy|fake|\$\{|\{\{)", line
+        ):
+            service_account_private_line = line_number
+
+    if service_account_type_line is not None and service_account_private_line is not None:
+        add("VW-FIREBASE-SERVICE-ACCOUNT", service_account_private_line)
+
+    if candidate.path.suffix.lower() == ".sql":
+        for match in _SUPABASE_RLS_DISABLED_RE.finditer(text):
+            add("VW-SUPABASE-RLS-DISABLED", text.count("\n", 0, match.start()) + 1)
+
+    if candidate.path.name != "package.json":
+        return None
+    try:
+        manifest = json.loads(text)
+    except json.JSONDecodeError:
+        add("VW-MANIFEST-INVALID", 1)
+        return {"valid": False, "path": candidate.display_path, "directory": candidate.path.parent}
+    if not isinstance(manifest, dict):
+        add("VW-MANIFEST-INVALID", 1)
+        return {"valid": False, "path": candidate.display_path, "directory": candidate.path.parent}
+    scripts = manifest.get("scripts")
+    if isinstance(scripts, dict):
+        for name in ("preinstall", "install", "postinstall", "prepare"):
+            if isinstance(scripts.get(name), str):
+                add("VW-INSTALL-SCRIPT", _line_for_json_key(lines, name))
+    dependency_sections = ("dependencies", "devDependencies", "optionalDependencies")
+    has_dependencies = any(isinstance(manifest.get(section), dict) and bool(manifest[section]) for section in dependency_sections)
+    return {
+        "valid": True,
+        "path": candidate.display_path,
+        "directory": candidate.path.parent,
+        "has_dependencies": has_dependencies,
+    }
+
+
+def _nearest_lockfiles(directory: Path, scan_root: Path, lockfiles_by_directory: dict[Path, list[Candidate]]) -> list[Candidate]:
+    current = directory
+    while True:
+        if current in lockfiles_by_directory:
+            return lockfiles_by_directory[current]
+        if current == scan_root or current.parent == current or not _contains_path(scan_root, current.parent):
+            return []
+        current = current.parent
+
+
+def _add_dependency_findings(
+    candidates: Sequence[Candidate],
+    manifests: Sequence[dict[str, object]],
+    scan_root: Path,
+    root_is_file: bool,
+    findings: list[Finding],
+) -> None:
+    if root_is_file:
+        return
+    lockfiles_by_directory: dict[Path, list[Candidate]] = {}
+    for candidate in candidates:
+        if candidate.path.name in _LOCKFILES and not (
+            {part.lower() for part in Path(candidate.display_path).parts[:-1]} & _SKIP_DIR_NAMES
+        ):
+            lockfiles_by_directory.setdefault(candidate.path.parent, []).append(candidate)
+    for lockfiles in lockfiles_by_directory.values():
+        distinct_names = {candidate.path.name for candidate in lockfiles}
+        if len(distinct_names) > 1:
+            first = sorted(lockfiles, key=lambda item: item.display_path)[0]
+            findings.append(Finding("VW-LOCKFILE-CONFLICT", first.display_path, 1))
+    for manifest in manifests:
+        if not manifest.get("valid") or not manifest.get("has_dependencies"):
+            continue
+        directory = manifest.get("directory")
+        if isinstance(directory, Path) and not _nearest_lockfiles(directory, scan_root, lockfiles_by_directory):
+            findings.append(Finding("VW-LOCKFILE-MISSING", str(manifest["path"]), 1))
+
+
+def _parse_suppression(line: str) -> tuple[str, dict[str, str]] | None:
+    match = _SUPPRESSION_RE.search(line)
+    if not match:
+        return None
+    rule_id = match.group("rule").upper()
+    metadata_text = match.group("meta").strip()
+    metadata_text = re.sub(r"(?:\*/|-->)\s*$", "", metadata_text).strip()
+    try:
+        tokens = shlex.split(metadata_text, posix=True)
+    except ValueError:
+        return rule_id, {}
+    metadata: dict[str, str] = {}
+    for token in tokens:
+        if "=" not in token:
+            return rule_id, {}
+        key, value = token.split("=", 1)
+        key = key.strip().lower().replace("_", "-")
+        if not key or key in metadata:
+            return rule_id, {}
+        metadata[key] = value.strip()
+    return rule_id, metadata
+
+
+def _valid_suppression_metadata(metadata: dict[str, str], today: dt.date) -> tuple[bool, str | None]:
+    required = {"reason", "owner", "approved-by", "compensating-control", "expires"}
+    if not required.issubset(metadata) or any(not metadata[key].strip() for key in required):
+        return False, None
+    if any(len(metadata[key]) > 512 or any(ord(character) < 32 for character in metadata[key]) for key in required):
+        return False, None
+    if metadata["owner"].strip().casefold() == metadata["approved-by"].strip().casefold():
+        return False, None
+    try:
+        expiry = dt.date.fromisoformat(metadata["expires"].strip())
+    except ValueError:
+        return False, None
+    if expiry <= today:
+        return False, None
+    return True, expiry.isoformat()
+
+
+def _apply_suppressions(findings: list[Finding], sources: dict[str, str], today: dt.date | None = None) -> None:
+    today = today or dt.date.today()
+    additions: list[Finding] = []
+    for path, source in sorted(sources.items()):
+        for line_number, line in enumerate(source.splitlines(), start=1):
+            if not _SUPPRESSION_HINT_RE.search(line):
+                continue
+            same_line = [finding for finding in findings if finding.path == path and finding.line == line_number]
+            if not same_line:
+                continue
+            parsed = _parse_suppression(line)
+            if parsed is None:
+                additions.append(Finding("VW-SUPPRESSION-INVALID", path, line_number))
+                continue
+            target_rule, metadata = parsed
+            targets = [finding for finding in same_line if finding.rule_id == target_rule]
+            if not targets:
+                additions.append(Finding("VW-SUPPRESSION-INVALID", path, line_number))
+                continue
+            if any(target.rule.severity == BLOCKER for target in targets):
+                additions.append(Finding("VW-SUPPRESSION-BLOCKER", path, line_number))
+                continue
+            valid, expiry = _valid_suppression_metadata(metadata, today)
+            if not valid:
+                additions.append(Finding("VW-SUPPRESSION-INVALID", path, line_number))
+                continue
+            for target in targets:
+                target.suppressed = True
+                target.suppression = {
+                    "status": "accepted",
+                    "metadata_complete": True,
+                    "independent_approver": True,
+                    "expires": expiry,
+                    "values_redacted": True,
+                }
+    findings.extend(additions)
+
+
+def scan_path(path: str | os.PathLike[str], max_file_bytes: int = DEFAULT_MAX_FILE_BYTES, max_files: int = DEFAULT_MAX_FILES) -> Report:
+    report = Report()
+    try:
+        target = Path(path)
+    except (TypeError, ValueError):
+        report.tool_errors.append(ToolIssue("tool.target", "The requested target is invalid."))
+        return report
+    candidates, scan_root, root_is_file = _enumerate_candidates(target, report)
+    if report.tool_errors:
+        return report
+    report.files_considered = len(candidates)
+    if len(candidates) > max_files:
+        report.tool_errors.append(ToolIssue("tool.file-limit", "The candidate-file limit was exceeded; no partial clean result was produced."))
+        return report
+
+    sources: dict[str, str] = {}
+    manifests: list[dict[str, object]] = []
+    for candidate in candidates:
+        text = _read_candidate(candidate, scan_root, root_is_file, max_file_bytes, report)
+        if text is None:
+            continue
+        sources[candidate.display_path] = text
+        manifest = _scan_text(candidate, text, report.findings)
+        if manifest is not None:
+            manifests.append(manifest)
+
+    _add_dependency_findings(candidates, manifests, scan_root, root_is_file, report.findings)
+    _apply_suppressions(report.findings, sources)
+    unique: dict[tuple[str, str, int], Finding] = {}
+    for finding in report.findings:
+        key = (finding.rule_id, finding.path, finding.line)
+        existing = unique.get(key)
+        if existing is None or (finding.suppressed and not existing.suppressed):
+            unique[key] = finding
+    report.findings = sorted(unique.values(), key=lambda finding: (finding.path, finding.line, finding.rule_id))
+    report.tool_errors.sort(key=lambda issue: (issue.path, issue.code))
+    return report
+
+
+def render_text(report: Report) -> str:
+    summary = report.summary()
+    lines = [
+        "VibeWorthy preflight",
+        f"Scope: {report.scope.mode}; includes: {', '.join(report.scope.includes) or 'none'}.",
+        "Coverage: current target only; Git history and submodule contents were not scanned.",
+        "Safety: network not used; project files not modified; matched values are never reported.",
+    ]
+    if report.findings:
+        lines.append("Findings:")
+        for finding in report.findings:
+            state = "[SUPPRESSED]" if finding.suppressed else ""
+            lines.append(
+                f"- [{finding.rule.severity.upper()}]{state} {finding.rule_id} {finding.path}:{finding.line} — {finding.rule.message}"
+            )
+            lines.append(f"  Remediation: {finding.rule.remediation}")
+            if finding.suppressed:
+                lines.append("  Suppression: validated metadata present; values redacted; release evidence unchanged.")
+    else:
+        lines.append("Findings: none.")
+    if report.tool_errors:
+        lines.append("Tool errors:")
+        for issue in report.tool_errors:
+            lines.append(f"- [TOOL-ERROR] {issue.code} {issue.path} — {issue.message}")
+    skipped = ", ".join(f"{key}={value}" for key, value in sorted(report.skipped.items())) or "none"
+    lines.extend(
+        [
+            (
+                "Summary: "
+                f"considered={summary['files_considered']} scanned={summary['files_scanned']} "
+                f"skipped={summary['files_skipped']} blockers={summary['blockers']} "
+                f"warnings={summary['warnings']} suppressed={summary['suppressed_warnings']} "
+                f"manual-checks={summary['required_manual_checks']} tool-errors={summary['tool_errors']}."
+            ),
+            f"Skipped by reason: {skipped}.",
+            f"Exit code: {report.exit_code}.",
+            "Release assertion: none. Exit 0 only means no scanner blocker; it is not GO or proof of security/readiness.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_json(report: Report) -> str:
+    return json.dumps(report.as_dict(), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+
+
+def _sarif_rule(rule: Rule) -> dict[str, object]:
+    return {
+        "id": rule.rule_id,
+        "name": rule.title.replace(" ", ""),
+        "shortDescription": {"text": rule.title},
+        "fullDescription": {"text": rule.message},
+        "defaultConfiguration": {"level": "error" if rule.severity == BLOCKER else "warning"},
+        "properties": {"severity": rule.severity, "category": rule.category, "remediation": rule.remediation},
+    }
+
+
+def render_sarif(report: Report) -> str:
+    used_rules = sorted({finding.rule_id for finding in report.findings})
+    results: list[dict[str, object]] = []
+    for finding in report.findings:
+        result: dict[str, object] = {
+            "ruleId": finding.rule_id,
+            "level": "error" if finding.rule.severity == BLOCKER else "warning",
+            "message": {"text": finding.rule.message},
+            "locations": [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": quote(finding.path, safe="/._-")},
+                        "region": {"startLine": finding.line},
+                    }
+                }
+            ],
+            "properties": {
+                "severity": finding.rule.severity,
+                "evidenceCategory": finding.rule.category,
+                "remediation": finding.rule.remediation,
+                "suppressed": finding.suppressed,
+            },
+        }
+        if finding.suppressed:
+            result["suppressions"] = [
+                {
+                    "kind": "inSource",
+                    "status": "accepted",
+                    "justification": "Validated warning metadata is present; values are redacted and release evidence is unchanged.",
+                }
+            ]
+        results.append(result)
+    notifications = [
+        {
+            "descriptor": {"id": issue.code},
+            "level": "error",
+            "message": {"text": issue.message},
+            "properties": {"path": issue.path, "suppressible": False},
+        }
+        for issue in report.tool_errors
+    ]
+    document = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": TOOL_NAME,
+                        "version": TOOL_VERSION,
+                        "semanticVersion": TOOL_VERSION,
+                        "rules": [_sarif_rule(RULES[rule_id]) for rule_id in used_rules],
+                    }
+                },
+                "invocations": [
+                    {
+                        "executionSuccessful": not report.tool_errors,
+                        "exitCode": report.exit_code,
+                        "toolExecutionNotifications": notifications,
+                        "properties": {
+                            "scope": report.scope.as_dict(),
+                            "summary": report.summary(),
+                            "releaseAssertion": "none",
+                        },
+                    }
+                ],
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+
+
+def _detect_requested_format(arguments: Sequence[str]) -> str:
+    for index, argument in enumerate(arguments):
+        if argument.startswith("--format="):
+            candidate = argument.split("=", 1)[1]
+            return candidate if candidate in {"text", "json", "sarif"} else "text"
+        if argument == "--format" and index + 1 < len(arguments):
+            candidate = arguments[index + 1]
+            return candidate if candidate in {"text", "json", "sarif"} else "text"
+    return "text"
+
+
+def _positive_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError
+    return parsed
+
+
+def _parser() -> SafeArgumentParser:
+    parser = SafeArgumentParser(
+        prog="preflight.py",
+        description="Read-only local VibeWorthy preflight. A clean scan is not a release approval.",
+    )
+    parser.add_argument("path", nargs="?", default=".", help="file or directory to scan (default: current directory)")
+    parser.add_argument("--format", choices=("text", "json", "sarif"), default="text", help="report format")
+    parser.add_argument("--max-file-bytes", type=_positive_integer, default=DEFAULT_MAX_FILE_BYTES, help="skip larger files")
+    parser.add_argument("--max-files", type=_positive_integer, default=DEFAULT_MAX_FILES, help="fail closed above this candidate count")
+    parser.add_argument("--version", action="version", version=f"{TOOL_NAME} {TOOL_VERSION}")
+    return parser
+
+
+def _render(report: Report, output_format: str) -> str:
+    if output_format == "json":
+        return render_json(report)
+    if output_format == "sarif":
+        return render_sarif(report)
+    return render_text(report)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    output_format = _detect_requested_format(arguments)
+    try:
+        options = _parser().parse_args(arguments)
+    except UsageFailure:
+        report = Report()
+        report.tool_errors.append(ToolIssue("usage.invalid-arguments", "Invalid command-line arguments."))
+        sys.stdout.write(_render(report, output_format))
+        return 2
+    try:
+        report = scan_path(options.path, options.max_file_bytes, options.max_files)
+    except KeyboardInterrupt:
+        report = Report()
+        report.tool_errors.append(ToolIssue("tool.interrupted", "The scan was interrupted before a complete result was produced."))
+    except Exception:  # A safe closed failure must never render source or exception text.
+        report = Report()
+        report.tool_errors.append(ToolIssue("tool.internal", "The scan failed before a complete result was produced."))
+    sys.stdout.write(_render(report, options.format))
+    return report.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
