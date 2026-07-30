@@ -35,7 +35,7 @@
       },
       {
         "name": "vibeworthy:generator",
-        "value": "manually reviewed CycloneDX 1.6 manifest; release archive digest and source commit are recorded in the release evidence"
+        "value": "manually reviewed CycloneDX 1.6 manifest; while the project is unpublished, the release archive digest and source commit remain to be recorded in the release evidence before publication"
       }
     ]
   },

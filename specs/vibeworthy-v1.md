@@ -416,15 +416,29 @@ while linking to the full references for manual use.
 
 ## Verification and Traceability
 
-- REVIEW-001 | security | passed | reviewer: `/root/security_research` | evidence: 2026-07-30 initial
-  adversarial pass failed on missing agent-authority/privacy gates, insufficient BaaS authorization and
-  supply-chain coverage, unsafe exception semantics, licensing ambiguity, and overstated v0 parity;
-  those findings remain recorded in EVD-014 and were resolved through REQ-002/006-009/011-015/017-021,
-  revised acceptance criteria, and the passing follow-up review below.
+- AUDIT-HIST-001 | failed | The 2026-07-30 initial `/root/security_research` review found missing
+  agent-authority/privacy gates, insufficient BaaS authorization and supply-chain coverage, unsafe
+  exception semantics, licensing ambiguity, and overstated v0 parity. EVD-014 and the follow-up review
+  preserve its remediation rather than relabeling that failed review as a pass.
 - REVIEW-002 | security | passed | reviewer: `/root/security_research` | evidence: 2026-07-30
   follow-up adversarial review confirmed both BaaS key-restriction enforcement and sensitive-data
   provider-term gates are explicit, blocking, and traceably tested; all prior substantive findings are
   resolved.
+- AUDIT-HIST-002 | failed | The 2026-07-30 `/root/package_audit` and `/root/repo_docs` adversarial
+  reviews of candidates `b2e73a5`, `d6827f4`, `218faf6`,
+  `a9fa98f`, and `4c4cf61` found and reproduced hook execution risk, report/path disclosure, TOCTOU and
+  suppression ambiguity, parser denial of service, Git pathspec omission, shell/Firebase evasions,
+  false blockers, and inconsistent evidence hashes. Every rejected candidate remains outside the
+  release score; each reproducible issue received a synthetic regression before the next candidate.
+- AUDIT-HIST-003 | failed | The `/root/article_review` pre-audit of `4c4cf61` found that templates
+  could weaken canonical activation, decision, state, checkout,
+  callback, MCP, and child-location requirements. The templates and directly linked references were
+  aligned before generating another forward-test candidate.
+- REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
+  adversarial audit against the exact next candidate; require no material findings before forward
+  evaluation.
+- REVIEW-006 | verification | planned | reviewer: pending independent evaluator | evidence: frozen
+  21-response forward suite against the exact reviewed skill candidate; require 21/21 before release.
 - TEST-001 | planned | Run official quick validation plus repository-specific frontmatter, reference,
   line-budget, and `openai.yaml` assertions.
 - TEST-002 | planned | Forward-test prototype versus paid-public-release prompts in isolated agents.

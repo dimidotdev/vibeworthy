@@ -32,7 +32,6 @@ TOOL_VERSION = "1.0.0"
 SCHEMA_VERSION = "1.0"
 DEFAULT_MAX_FILE_BYTES = 1_048_576
 DEFAULT_MAX_FILES = 20_000
-MAX_SHELL_TOKEN_CHARS = 4_096
 MAX_SUPPRESSION_METADATA_CHARS = 4_096
 
 BLOCKER = "blocker"
@@ -459,10 +458,6 @@ _FIREBASE_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])AIza[A-Za-z0-9_-]{35}(?![A-Za-
 _SUPABASE_PUBLIC_RE = re.compile(r"(?<![A-Za-z0-9_-])sb_publishable_[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])")
 _SUPABASE_SECRET_RE = re.compile(r"(?<![A-Za-z0-9_-])sb_secret_[A-Za-z0-9_-]{20,255}(?![A-Za-z0-9_-])")
 _JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,2048}\.[A-Za-z0-9_-]{5,4096}\.[A-Za-z0-9_-]{5,2048}(?![A-Za-z0-9_-])")
-_GENERIC_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<name>[A-Z0-9_.\"'-]{0,128}(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|access[_-]?key)[A-Z0-9_.\"'-]{0,128})"
-    r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[A-Za-z0-9_./+=:@%$!~-]{12,4096})(?P=quote)"
-)
 _CREDENTIAL_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s/:@]{1,128}:[^\s/@]{8,512}@")
 _PUBLIC_CLIENT_CREDENTIAL_RE = re.compile(
     r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]{0,128}(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
@@ -472,17 +467,32 @@ _SERVICE_ROLE_ASSIGNMENT_RE = re.compile(
     r"(?i)(?P<name>\b[A-Z0-9_]{0,128}SUPABASE[A-Z0-9_]{0,128}SERVICE_ROLE[A-Z0-9_]{0,128})"
     r"\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^\s\"'`,;#]{12,4096})(?P=quote)"
 )
-_PUBLIC_CLIENT_PATH_RE = re.compile(
-    r"(?i)(?P<name>\b(?:VITE|NEXT_PUBLIC|PUBLIC|REACT_APP)_[A-Z0-9_]{0,128}(?:SERVICE_ROLE|SECRET|PRIVATE_KEY|ADMIN_KEY|DATABASE_PASSWORD))"
-    r"\s*[:=].*$"
+_ASSIGNMENT_NAME_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.\"'-"
 )
-_SERVICE_ROLE_PATH_RE = re.compile(
-    r"(?i)(?P<name>\b[A-Z0-9_]{0,128}SUPABASE[A-Z0-9_]{0,128}SERVICE_ROLE[A-Z0-9_]{0,128})"
-    r"\s*[:=].*$"
+_ASSIGNMENT_VALUE_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./+=:@%$!~-"
 )
-_GENERIC_PATH_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<name>[A-Z0-9_.\"'-]{0,128}(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|access[_-]?key)[A-Z0-9_.\"'-]{0,128})"
-    r"\s*[:=].*$"
+_GENERIC_SECRET_NAME_HINTS = (
+    "api_key",
+    "api-key",
+    "apikey",
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "private_key",
+    "private-key",
+    "access_key",
+    "access-key",
+)
+_PUBLIC_CLIENT_PREFIXES = ("vite_", "next_public_", "public_", "react_app_")
+_PUBLIC_CLIENT_SUFFIXES = (
+    "service_role",
+    "secret",
+    "private_key",
+    "admin_key",
+    "database_password",
 )
 _SUPABASE_RLS_DISABLED_RE = re.compile(
     r"\bALTER\s+TABLE(?:\s+IF\s+EXISTS)?\s+(?:ONLY\s+)?"
@@ -495,20 +505,28 @@ _FIREBASE_TRUE_EXPRESSION = (
     r"(?:true(?: *== *true)?|false *== *false|1 *== *1|"
     r"(?:! *! *){1,16}true|! *(?:! *! *){0,15}false)"
 )
+_FIREBASE_OPEN_PARENS = r"(?:\( *)*"
+_FIREBASE_CLOSE_PARENS = r"(?: *\))*"
 _FIREBASE_RTD_RULE_RE = re.compile(
     r"[\"']?\.(?:read|write)[\"']? *: *(?:"
+    + _FIREBASE_OPEN_PARENS
     + _FIREBASE_TRUE_EXPRESSION
+    + _FIREBASE_CLOSE_PARENS
     + r"|(?P<quote>[\"']) *"
+    + _FIREBASE_OPEN_PARENS
     + _FIREBASE_TRUE_EXPRESSION
+    + _FIREBASE_CLOSE_PARENS
     + r" *(?P=quote))",
     re.IGNORECASE,
 )
 _FIREBASE_ALLOW_RE = re.compile(
     r"\ballow +(?:read|write|create|update|delete|get|list)"
     r"(?: *, *(?:read|write|create|update|delete|get|list))*"
-    r" *: *if *\(? *"
+    r" *: *if *"
+    + _FIREBASE_OPEN_PARENS
     + _FIREBASE_TRUE_EXPRESSION
-    + r" *\)? *;",
+    + _FIREBASE_CLOSE_PARENS
+    + r" *;",
     re.IGNORECASE,
 )
 _ACTION_USES_RE = re.compile(
@@ -528,6 +546,113 @@ def _contains_path(parent: Path, child: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _normalized_assignment_name(value: str) -> str:
+    return value.strip().strip("\"'").lower()
+
+
+def _is_secret_assignment_name(value: str) -> bool:
+    """Classify an assignment name in bounded linear time."""
+
+    normalized = _normalized_assignment_name(value)
+    if any(hint in normalized for hint in _GENERIC_SECRET_NAME_HINTS):
+        return True
+    if normalized.startswith(_PUBLIC_CLIENT_PREFIXES) and normalized.endswith(
+        _PUBLIC_CLIENT_SUFFIXES
+    ):
+        return True
+    supabase_index = normalized.find("supabase")
+    return supabase_index >= 0 and normalized.find("service_role", supabase_index + 8) >= 0
+
+
+def _generic_assignments(line: str) -> Iterable[tuple[str, str]]:
+    """Yield credential-like assignments without backtracking over untrusted text."""
+
+    name_start: int | None = None
+    name_end: int | None = None
+    whitespace_after_name = False
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if character in _ASSIGNMENT_NAME_CHARS:
+            if name_start is None or whitespace_after_name:
+                name_start = index
+            name_end = index + 1
+            whitespace_after_name = False
+            index += 1
+            continue
+        if character.isspace():
+            if name_start is not None:
+                whitespace_after_name = True
+            index += 1
+            continue
+        if character not in {":", "="}:
+            name_start = None
+            name_end = None
+            whitespace_after_name = False
+            index += 1
+            continue
+
+        name = line[name_start:name_end] if name_start is not None and name_end is not None else ""
+        value_index = index + 1
+        while value_index < len(line) and line[value_index].isspace():
+            value_index += 1
+        quote_character = ""
+        if value_index < len(line) and line[value_index] in {'"', "'"}:
+            quote_character = line[value_index]
+            value_index += 1
+        value_start = value_index
+        while value_index < len(line) and line[value_index] in _ASSIGNMENT_VALUE_CHARS:
+            value_index += 1
+        value = line[value_start:value_index]
+        quote_closed = not quote_character or (
+            value_index < len(line) and line[value_index] == quote_character
+        )
+        if (
+            _is_secret_assignment_name(name)
+            and 12 <= len(value) <= 4_096
+            and quote_closed
+        ):
+            yield name, value
+
+        index = value_index + (1 if quote_character and quote_closed else 0)
+        name_start = None
+        name_end = None
+        whitespace_after_name = False
+
+
+def _secret_assignment_separator(value: str) -> int | None:
+    """Locate the first secret-like path assignment without regex backtracking."""
+
+    name_start: int | None = None
+    name_end: int | None = None
+    whitespace_after_name = False
+    for index, character in enumerate(value):
+        if character in _ASSIGNMENT_NAME_CHARS:
+            if name_start is None or whitespace_after_name:
+                name_start = index
+            name_end = index + 1
+            whitespace_after_name = False
+        elif character.isspace():
+            if name_start is not None:
+                whitespace_after_name = True
+        elif character in {":", "="}:
+            name = (
+                value[name_start:name_end]
+                if name_start is not None and name_end is not None
+                else ""
+            )
+            if _is_secret_assignment_name(name):
+                return index
+            name_start = None
+            name_end = None
+            whitespace_after_name = False
+        else:
+            name_start = None
+            name_end = None
+            whitespace_after_name = False
+    return None
 
 
 def _safe_display_component(value: str) -> str:
@@ -553,19 +678,9 @@ def _safe_display_component(value: str) -> str:
     ):
         safe = pattern.sub("[REDACTED]", safe)
     safe = _CREDENTIAL_URL_RE.sub("[REDACTED-CREDENTIAL-URL]", safe)
-    for pattern in (
-        _PUBLIC_CLIENT_PATH_RE,
-        _SERVICE_ROLE_PATH_RE,
-        _GENERIC_PATH_ASSIGNMENT_RE,
-    ):
-        safe = pattern.sub(
-            lambda match: f"{match.group('name')}=[REDACTED]",
-            safe,
-        )
-    safe = _GENERIC_ASSIGNMENT_RE.sub(
-        lambda match: f"{match.group('name')}=[REDACTED]",
-        safe,
-    )
+    assignment_separator = _secret_assignment_separator(safe)
+    if assignment_separator is not None:
+        safe = safe[: assignment_separator + 1] + "[REDACTED]"
     return safe or "."
 
 
@@ -681,7 +796,9 @@ def _git_candidates(target: Path, target_is_file: bool, report: Report) -> list[
         report.tool_errors.append(ToolIssue("tool.scope", "The requested target is outside the resolved Git worktree."))
         return []
 
-    pathspec = target_resolved.relative_to(git_root).as_posix() or "."
+    relative_target = target_resolved.relative_to(git_root)
+    raw_pathspec = "" if not relative_target.parts else relative_target.as_posix()
+    pathspec = f":(top,literal){raw_pathspec}"
     commands = (
         (True, ["ls-files", "-z", "--cached", "--", pathspec]),
         (False, ["ls-files", "-z", "--others", "--exclude-standard", "--", pathspec]),
@@ -995,7 +1112,7 @@ def _logical_shell_commands(text: str) -> Iterable[tuple[int, str]]:
         yield start_line, " ".join(parts)
 
 
-def _shell_command_name(tokens: Sequence[str]) -> str | None:
+def _command_invocation(tokens: Sequence[str]) -> tuple[str | None, int | None]:
     index = 0
     assignment = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
     while index < len(tokens) and assignment.fullmatch(tokens[index]):
@@ -1029,7 +1146,7 @@ def _shell_command_name(tokens: Sequence[str]) -> str | None:
     while index < len(tokens):
         name = _normalized_executable_name(tokens[index])
         if name not in wrappers:
-            return name
+            return name, index
         index += 1
         while index < len(tokens):
             token = tokens[index]
@@ -1045,7 +1162,11 @@ def _shell_command_name(tokens: Sequence[str]) -> str | None:
             index += 1
             if option in options_with_value.get(name, set()) and "=" not in token and index < len(tokens):
                 index += 1
-    return None
+    return None, None
+
+
+def _shell_command_name(tokens: Sequence[str]) -> str | None:
+    return _command_invocation(tokens)[0]
 
 
 def _normalized_executable_name(value: str) -> str:
@@ -1091,17 +1212,62 @@ def _tokens_have_remote_pipeline(tokens: Sequence[str]) -> bool:
 def _shell_command_payloads(tokens: Sequence[str]) -> list[str]:
     shells = {"bash", "csh", "dash", "ksh", "sh", "zsh"}
     payloads: list[str] = []
-    for index, token in enumerate(tokens[:-2]):
-        if _normalized_executable_name(token) not in shells:
+    simple_commands: list[list[str]] = []
+    simple_command: list[str] = []
+    for token in tokens:
+        if token and all(character in "|;&" for character in token):
+            if simple_command:
+                simple_commands.append(simple_command)
+            simple_command = []
+        else:
+            simple_command.append(token)
+    if simple_command:
+        simple_commands.append(simple_command)
+
+    shell_options_with_value = {"-O", "-o", "--init-file", "--rcfile"}
+    for command in simple_commands:
+        executable, executable_index = _command_invocation(command)
+        if executable_index is None:
             continue
-        option = tokens[index + 1]
-        if option.startswith("-") and "c" in option[1:] and index + 2 < len(tokens):
-            payloads.append(tokens[index + 2])
+
+        if executable == "cmd":
+            for index in range(executable_index + 1, len(command) - 1):
+                if command[index].lower() in {"/c", "/k"}:
+                    payloads.append(" ".join(command[index + 1 :]))
+                    break
+            continue
+
+        if executable not in shells:
+            continue
+        index = executable_index + 1
+        while index < len(command):
+            option = command[index]
+            if option == "--":
+                break
+            if not option.startswith("-") or option == "-":
+                break
+            is_command_option = option == "-c" or (
+                option.startswith("-")
+                and not option.startswith("--")
+                and "c" in option[1:]
+            )
+            if is_command_option:
+                payload_index = index + 1
+                if payload_index < len(command) and command[payload_index] == "--":
+                    payload_index += 1
+                if payload_index < len(command):
+                    payloads.append(command[payload_index])
+                break
+            option_name = option.split("=", 1)[0]
+            if option_name in shell_options_with_value and "=" not in option:
+                index += 2
+                continue
+            index += 1
     return payloads
 
 
 def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
-    """Extract executable $(...) and backtick payloads without evaluating shell syntax."""
+    """Extract executable command/process substitutions without evaluating them."""
 
     payloads: list[str] = []
     quote_character: str | None = None
@@ -1125,7 +1291,13 @@ def _command_substitution_payloads(command: str) -> tuple[list[str], bool]:
             quote_character = None if quote_character == '"' else ('"' if quote_character is None else quote_character)
             index += 1
             continue
-        if quote_character != "'" and character == "$" and index + 1 < len(command) and command[index + 1] == "(":
+        is_command_substitution = character == "$" and quote_character != "'"
+        is_process_substitution = character in {"<", ">"} and quote_character is None
+        if (
+            (is_command_substitution or is_process_substitution)
+            and index + 1 < len(command)
+            and command[index + 1] == "("
+        ):
             start = index + 2
             cursor = start
             depth = 1
@@ -1199,7 +1371,13 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
             if character == quote_character:
                 quote_character = None
             elif character == "\\" and quote_character == '"':
-                escaped = True
+                if (
+                    index + 1 < len(command)
+                    and command[index + 1] in '$`"\\\n'
+                ):
+                    escaped = True
+                else:
+                    current.append(character)
             else:
                 current.append(character)
             index += 1
@@ -1209,7 +1387,10 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
             index += 1
             continue
         if character == "\\":
-            escaped = True
+            if index + 1 < len(command) and command[index + 1] in " \t\r\n\"'`$|;&<>\\":
+                escaped = True
+            else:
+                current.append(character)
             index += 1
             continue
         if character.isspace():
@@ -1218,6 +1399,23 @@ def _tokenize_shell_line(command: str) -> tuple[list[str], bool]:
             continue
         if character == "#" and not current:
             break
+        if character in "<>" or (
+            character == "&" and index + 1 < len(command) and command[index + 1] == ">"
+        ):
+            finish_token()
+            end = index + 1
+            if character == "&":
+                end += 1
+            else:
+                while end < len(command) and command[end] == character:
+                    end += 1
+                if end < len(command) and command[end] == "&":
+                    end += 1
+            while end < len(command) and (command[end].isdigit() or command[end] == "-"):
+                end += 1
+            tokens.append(command[index:end])
+            index = end
+            continue
         if character in "|;&":
             finish_token()
             end = index + 1
@@ -1239,7 +1437,7 @@ def _remote_pipeline_status(command: str, depth: int = 0) -> tuple[bool, bool]:
         r"\b(?:curl|wget)(?:\.exe)?\b", command, re.IGNORECASE
     ) is None:
         return False, False
-    if len(command) > MAX_SHELL_TOKEN_CHARS or depth > 4:
+    if depth > 4:
         return False, True
     tokens, complete = _tokenize_shell_line(command)
     if not complete:
@@ -1271,17 +1469,65 @@ def _remote_pipe_line_numbers(text: str) -> tuple[list[int], list[int]]:
 
 
 def _normalized_firebase_rules(text: str) -> tuple[str, list[int]]:
-    """Collapse whitespace runs in linear time and retain original line locations."""
+    """Remove comments and collapse whitespace linearly while retaining locations."""
 
     output: list[str] = []
     line_numbers: list[int] = []
     line_number = 1
+    quote_character: str | None = None
+    escaped = False
     index = 0
+
+    def append_space(source_line: int) -> None:
+        if output and output[-1] != " ":
+            output.append(" ")
+            line_numbers.append(source_line)
+
     while index < len(text):
         character = text[index]
-        if character.isspace():
-            output.append(" ")
+        if quote_character is not None:
+            if not escaped and character.isspace():
+                append_space(line_number)
+                while index < len(text) and text[index].isspace():
+                    if text[index] == "\n":
+                        line_number += 1
+                    index += 1
+                continue
+            output.append(character)
             line_numbers.append(line_number)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote_character:
+                quote_character = None
+            if character == "\n":
+                line_number += 1
+            index += 1
+            continue
+        if character in {'"', "'"}:
+            quote_character = character
+            output.append(character)
+            line_numbers.append(line_number)
+            index += 1
+            continue
+        if text.startswith("//", index):
+            append_space(line_number)
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if text.startswith("/*", index):
+            append_space(line_number)
+            index += 2
+            while index < len(text) and not text.startswith("*/", index):
+                if text[index] == "\n":
+                    line_number += 1
+                index += 1
+            index = min(len(text), index + 2)
+            continue
+        if character.isspace():
+            append_space(line_number)
             while index < len(text) and text[index].isspace():
                 if text[index] == "\n":
                     line_number += 1
@@ -1350,27 +1596,9 @@ def _scan_text(candidate: Candidate, text: str, findings: list[Finding]) -> dict
         if service_role_match and not _placeholder(service_role_match.group("value")):
             add("VW-SUPABASE-PRIVILEGED-KEY", line_number)
 
-        lowered_line = line.lower()
-        if any(
-            hint in lowered_line
-            for hint in (
-                "api_key",
-                "api-key",
-                "apikey",
-                "secret",
-                "token",
-                "password",
-                "passwd",
-                "private_key",
-                "private-key",
-                "access_key",
-                "access-key",
-            )
-        ):
-            for assignment in _GENERIC_ASSIGNMENT_RE.finditer(line):
-                value = assignment.group("value")
-                if not _placeholder(value) and not _is_known_specialized_value(value):
-                    add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
+        for _name, value in _generic_assignments(line):
+            if not _placeholder(value) and not _is_known_specialized_value(value):
+                add("VW-SECRET-GENERIC-ASSIGNMENT", line_number)
 
         if workflow_file:
             for action_match in _ACTION_USES_RE.finditer(line):

@@ -10,7 +10,7 @@ Copy this file for the work item. Replace bracketed prompts, delete instructiona
 - Requested outcome: `[one sentence]`
 - Requested mode: `explore | prototype | ship`
 - Effective safety mode: `explore | prototype | ship`
-- Elevation triggers: `[public endpoint / real data / auth / payment / privileged integration / destructive or external side effect / none]`
+- Elevation triggers: `[public endpoint / network or provider sandbox / real data / auth / payment / privileged integration / production / destructive or external side effect / none]`
 
 ## Authority envelope
 
@@ -47,12 +47,14 @@ Do not invent a source or metric. Record missing evidence as missing.
 ### Value, distribution, and activation
 
 - Value promise: `[specific improvement without unsupported superlative]`
-- First reachable cohort: `[bounded group]`
-- Primary distribution path and owner: `[specific channel/access]`
-- Message-to-product handoff: `[route into the experience]`
-- Activation event: `[actor + action + object + precondition + time window]`
+- First cohort: `[bounded reachable group]`
+- Channel owner: `[person or role]`
+- Access mechanism: `[specific channel and permission path]`
+- Handoff/message: `[message and route into the experience]`
+- Friction: `[specific access, trust, timing, or handoff constraint]`
+- Activation: `[actor], after [precondition], completes [action] on [object] within [time window]`
 - Smallest experiment: `[what tests the riskiest assumption]`
-- Proposed success signal and rationale: `[observable threshold; label proposed]`
+- Proposed threshold and rationale: `[observable number; why it changes this decision; what it does not establish]`
 - Stop or redesign condition: `[observable condition]`
 
 ## Build contract
@@ -80,12 +82,13 @@ Decision: `[what must be chosen]`
 
 | Criterion | Option A: `[name]` | Option B: `[name]` |
 | --- | --- | --- |
-| User value / activation | `[effect]` | `[effect]` |
-| Security / privacy | `[effect]` | `[effect]` |
-| Maintenance / recovery | `[effect]` | `[effect]` |
-| Accessibility / performance | `[effect]` | `[effect]` |
-| Cost / portability / lock-in | `[effect]` | `[effect]` |
-| Reversibility / migration | `[effect]` | `[effect]` |
+| User value | `[effect]` | `[effect]` |
+| Security / privacy risk | `[effect]` | `[effect]` |
+| Maintenance | `[effect]` | `[effect]` |
+| Accessibility | `[effect]` | `[effect]` |
+| Cost | `[monetary or operational effect]` | `[monetary or operational effect]` |
+| Portability | `[lock-in or exit effect]` | `[lock-in or exit effect]` |
+| Reversibility | `[rollback or migration path]` | `[rollback or migration path]` |
 
 - Choose: `[option]`
 - Cite evidence: `[repository/product evidence]`
@@ -101,13 +104,22 @@ Decision: `[what must be chosen]`
 ## UX and accessibility acceptance
 
 - Semantics, names, and instructions: `[criteria]`
-- Keyboard and focus completion: `[criteria]`
-- Mobile/reflow at 320 CSS pixels: `[criteria]`
-- Loading, empty, error, success, retry, and recovery: `[criteria]`
-- Long/translated/missing/large content: `[criteria]`
 - Validation and asynchronous announcements: `[criteria]`
-- Activation-path performance: `[budget or measurement]`
 - Honest pricing, consent, cancellation, and destructive effects: `[criteria]`
+
+Use only `tested`, `unresolved`, or `not applicable — <reason>` in the disposition column.
+
+| State or boundary | Disposition | Evidence, criterion, or owner/action |
+| --- | --- | --- |
+| Loading | `[state]` | `[record]` |
+| Empty | `[state]` | `[record]` |
+| Error and recovery | `[state]` | `[record]` |
+| Duplicate or stale action | `[state]` | `[record]` |
+| Timeout and retry | `[state]` | `[record]` |
+| Keyboard and focus restoration | `[state]` | `[record]` |
+| 320 CSS-pixel reflow | `[state]` | `[record]` |
+| Long and translated content | `[state]` | `[record]` |
+| Performance at `[exact activation or commitment boundary]` | `[state]` | `[budget or measurement]` |
 
 ## Trust and data flags
 
@@ -126,3 +138,13 @@ Decision: `[what must be chosen]`
 | `[gate]` | `[specific artifact]` | `[kind]` | `[owner]` | `[action]` | missing |
 
 Do not begin a consequential slice while a required authority decision is unresolved. Do not hide a market, security, privacy, or release blocker behind implementation progress.
+
+## Actions
+
+State exactly what happened, not what a plan proposes. When nothing external or consequential was
+performed, write the literal sentence:
+
+`External actions performed: none`
+
+Otherwise record each action, exact target, environment, approval, result, and safe evidence without
+including credentials or personal data.

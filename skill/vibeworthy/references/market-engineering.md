@@ -47,6 +47,10 @@ Check whether the value promise and channel fit each other. Do not build a produ
 
 Define activation as the earliest user behavior that demonstrates received value, not account creation, page views, or button clicks by themselves. Give the event an exact actor, action, object, precondition, and time window.
 
+Write it in this literal shape so the precondition cannot disappear:
+
+`Activation: [actor], after [precondition], completes [action] on [object] within [time window]`
+
 Examples of useful shapes:
 
 - Complete the costly job with a valid result and no operator rescue.
@@ -84,11 +88,12 @@ Compare at least two viable options for a consequential or hard-to-reverse choic
 
 | Criterion | Option A | Option B |
 | --- | --- | --- |
-| User value and activation | `[effect]` | `[effect]` |
-| Security and privacy | `[boundary/risk]` | `[boundary/risk]` |
-| Maintenance and failure recovery | `[cost]` | `[cost]` |
-| Accessibility and performance | `[effect]` | `[effect]` |
-| Portability, price, and lock-in | `[effect]` | `[effect]` |
+| User value | `[effect]` | `[effect]` |
+| Security and privacy risk | `[boundary/risk]` | `[boundary/risk]` |
+| Maintenance | `[cost]` | `[cost]` |
+| Accessibility | `[effect]` | `[effect]` |
+| Monetary or operational cost | `[effect]` | `[effect]` |
+| Portability and lock-in | `[effect]` | `[effect]` |
 | Reversibility and migration | `[exit path]` | `[exit path]` |
 
 Select one option, cite repository and product evidence, and record the cost accepted. Prefer the simpler reversible option while evidence is weak. Revisit the decision when its stated trigger occurs.
@@ -122,5 +127,20 @@ For every user-facing slice, verify:
 - Preserve contrast, target size, zoom, reduced-motion preference, and non-color cues according to the project's applicable accessibility target.
 - Measure performance at the activation or conversion moment; avoid loading unrelated code, media, or third-party scripts on its critical path.
 - Make price, renewal, data use, consent, destructive effects, and cancellation clear before commitment.
+
+Record the following matrix for each user-facing slice. Use only `tested`, `unresolved`, or `not
+applicable — <reason>`; a proposed test is not a tested result.
+
+| State or boundary | Disposition | Evidence or next action |
+| --- | --- | --- |
+| Loading | `[state]` | `[record]` |
+| Empty | `[state]` | `[record]` |
+| Error and recovery | `[state]` | `[record]` |
+| Duplicate or stale action | `[state]` | `[record]` |
+| Timeout and retry | `[state]` | `[record]` |
+| Keyboard and focus restoration | `[state]` | `[record]` |
+| 320 CSS-pixel reflow | `[state]` | `[record]` |
+| Long and translated content | `[state]` | `[record]` |
+| Performance at `[exact activation or commitment boundary]` | `[state]` | `[budget/measurement]` |
 
 Test with the project's accessibility tooling, but also perform keyboard, focus, reflow, and recovery checks manually. Record untested assistive-technology behavior as a manual check rather than a pass.

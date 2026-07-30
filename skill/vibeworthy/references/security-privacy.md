@@ -39,7 +39,18 @@ For an agent, model provider, MCP server, or connected tool:
 - Disable unused methods and credentials; prefer read-only, sandboxed, scoped, and short-lived access.
 - Require explicit human approval for production access, deployment, external communication, billing, destructive actions, or durable external-state changes.
 
+Do not enable or connect a server when its publisher, transport, authentication path, or update source
+cannot be verified. Reject an unrestricted capability set: allowlist individual read, write, execute,
+delete, billing, email, and other methods only when required, and allowlist outbound destinations by
+host and method. Keep an attributable audit record of invocation, destination, data class, result, and
+approval without logging payload secrets. Require explicit approval before enabling the server and a
+separate point-of-action approval for each consequential method; enabling a server is not approval to
+invoke every method it exposes.
+
 Refuse to send a production credential or unrestricted data dump to an agent. Do not expose a value merely to ask whether it is secret.
+Do not open, read, request, echo, or reproduce an omitted fixture, synthetic canary, or credential value
+to demonstrate a control. Verify behavior through metadata, a safe path, or an obviously synthetic
+placeholder instead.
 
 ## Frame changed trust boundaries
 
@@ -55,6 +66,12 @@ For each changed boundary, record:
 - safe failure, bounded retry, timeout, idempotency, rollback or forward recovery, and containment.
 
 Turn each relevant abuse case into a control at the enforcement boundary and an observable positive or negative test. Do not accept a UI restriction as server authorization.
+
+Treat raw HTML from a user, model, CMS, callback, or external service as an output-encoding and
+injection boundary. Prefer removing raw HTML or rendering structured content with framework escaping.
+When HTML is indispensable, use a maintained sanitizer configured for the final browser context,
+review its allowlist and URL handling, and test adversarial elements, attributes, encodings, nested
+content, and protocol variants. Do not accept a blacklist or client-only check as sufficient evidence.
 
 ## Map OWASP Top 10:2025 and ASVS 5.0.0
 
@@ -152,6 +169,23 @@ Before shipping a system that handles personal data, record:
 | Backups | restoration exposure and tested eventual backup deletion or expiry |
 | Access | least privilege, user isolation, operator access, audit, and break-glass behavior |
 | Incident | detection, containment, contact, decision owner, and required escalation path |
+
+For precise or high-frequency location data about a child or minor:
+
+- classify the data as highly sensitive and record whether collection is necessary at all;
+- challenge precision, sampling frequency, continuous/background collection, retention, and every
+  secondary use;
+- prefer a less invasive design such as coarse location, user-initiated check-in, on-device processing,
+  short-lived state, or no location when it can still deliver the safety or product outcome;
+- define guardian, child, operator, and support authorization separately and prove cross-account denial
+  at the server, rule, or IAM boundary;
+- decide explicitly whether raw location may enter application logs, analytics, traces, support tools,
+  or model prompts; default to no raw-location logging;
+- keep provider, subprocessor, region, export/deletion, backup deletion, incident ownership, and
+  operator-access evidence unresolved until tested;
+- require qualified privacy/legal review for every named jurisdiction, explicitly including Brazil and
+  the European Union when either is in scope, without inventing a lawful basis or declaring guardian or
+  child consent valid.
 
 Escalate to qualified legal or privacy review when purpose, jurisdiction, sensitive data, children or minors, monitoring, biometrics, precise location, health, finance, employment, or cross-region processing makes the answer consequential. Keep the decision `NO-GO` until required review and lifecycle controls are resolved.
 

@@ -43,7 +43,7 @@ an explicit future approval gate.
 
 ## Candidate `6854bc0` — rejected after F01
 
-Candidate `6854bc0a69efbf71e37634787a1d85c3cd3fa816` was rejected before its behavior suite could
+Candidate `6854bc01cb946137954da18e94f019cb6edde2e2` was rejected before its behavior suite could
 continue. An independent technical audit found that specialized credential values split across path
 components could still leak and that an unmatched shell quote could make the scanner exceed its
 bounded-work expectation. Its F01 behavior score was also only 2/3: run 1 did not state an explicit

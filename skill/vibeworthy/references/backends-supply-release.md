@@ -6,6 +6,7 @@ Use this procedure for Firebase, Supabase, hosted backends, dependency changes, 
 
 - Classify Firebase and Supabase credentials
 - Prove backend authorization with an actor/action matrix
+- Gate checkout and callback authority
 - Gate hosted-backend operations
 - Control the software supply chain
 - Assemble release evidence and decide
@@ -63,6 +64,42 @@ For Supabase:
 - Record staging evidence and separately confirm that the intended schema, grants, RLS policies, functions, and secrets are deployed to the named production project.
 
 Return `NO-GO` when any applicable cell is untested, cross-user denial fails, a permissive fallback remains, a privileged path lacks independent authorization, or production parity is unresolved.
+
+When reviewing Firebase and Supabase candidates together, preserve every valid recorded pass, but keep
+their evidence and blockers separate. Return an independent release recommendation for each named
+candidate; a pass in one implementation cannot compensate for a blocker in the other.
+
+## Gate checkout and callback authority
+
+When an existing provider-hosted checkout and new browser card collection are both plausible, compare
+them explicitly across user value, card-data exposure, maintenance, accessibility, monetary or
+operational cost, portability, and reversibility. Prefer the existing hosted checkout while it can meet
+the observed product and accessibility requirements. Record the accepted loss of presentation or
+provider control and a concrete revisit trigger; do not invent a need for browser card handling.
+
+Keep plan and price authority on the server:
+
+- send only a stable, nonprivileged plan identifier from the client;
+- allowlist the plan and map it server-side to the configured price, amount, currency, interval, and
+  authenticated customer or tenant;
+- reject client-supplied amount, currency, provider price ID, owner, privilege, or redirect destination;
+- keep optional marketing consent unchecked and independent from purchase;
+- disclose total price, renewal cadence, and cancellation before commitment, and provide an accessible
+  self-service cancellation path.
+
+At every payment or other trusted callback receiver, verify:
+
+- authenticity using the provider's maintained signature, MAC, or equivalent mechanism over the exact
+  received payload;
+- freshness using the provider timestamp or another bounded age policy with an explicit clock tolerance;
+- replay resistance using a durable event identity and atomic idempotency behavior;
+- expected event type, destination account, customer/tenant, amount, currency, and state transition;
+- bounded retry, safe failure, redacted logging, alert ownership, reconciliation, and recovery from
+  partial processing.
+
+Test forged, stale, duplicated, reordered, malformed, and wrong-account callbacks at the receiving
+boundary. Return `NO-GO` while the browser can select price authority or any applicable callback gate
+is untested.
 
 ## Gate hosted-backend operations
 

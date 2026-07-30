@@ -43,10 +43,11 @@ Keep automated passes, failures, tool errors, and manual checks distinct. Never 
 
 - Authorized roots, tools, environment, and network: `[record]`
 - Production/deployment/external-action approval: `[named approval and exact action]`
-- MCP servers and capabilities reviewed: `[publisher, methods, scope, egress]`
+- MCP servers and capabilities reviewed: `[enablement approval, verified publisher/update source, allowed methods, denied methods, destination allowlist, audit evidence]`
 - Agent/model data sent: `[classification and minimized fields; no values]`
-- Provider retention/training/deletion/region approval: `[decision and owner]`
+- Provider retention/training/deletion/backup-deletion/region/subprocessor approval: `[decision and owner]`
 - Untrusted prompt/repository/tool-output controls: `[record]`
+- Omitted fixture/canary handling: `[not read, requested, reproduced, or exposed]`
 
 Return `NO-GO` when sensitive transmission terms are unresolved or required production authority is absent.
 
@@ -105,11 +106,29 @@ Return `NO-GO` for suspected exposure until revocation/rotation and required inv
 
 Return `NO-GO` for an untested applicable cell, cross-user failure, unresolved public-key restriction, or unaudited bypass path.
 
+## Payment, checkout, and callback integrity
+
+- Hosted checkout versus browser card collection decision: `[options, chosen path, accepted cost, revisit trigger]`
+- Client request contract: `[stable plan identifier only]`
+- Server-owned price mapping: `[allowlist and configured amount/currency/interval evidence]`
+- Rejected client authority: `[amount, currency, price ID, customer owner, redirect destination]`
+- Pre-commit disclosure: `[total price, renewal cadence, cancellation terms, unchecked optional consent]`
+- Accessible self-service cancellation: `[end-to-end evidence]`
+
+| Callback gate | Evidence | Result | Owner / next action |
+| --- | --- | --- | --- |
+| Authenticity at the receiver | `[signature/MAC or provider mechanism]` | pass/fail/unresolved | `[owner/action]` |
+| Freshness and bounded clock tolerance | `[timestamp/age evidence]` | pass/fail/unresolved | `[owner/action]` |
+| Replay resistance and idempotency | `[event identity and duplicate test]` | pass/fail/unresolved | `[owner/action]` |
+| Bounded retry, safe failure, and reconciliation | `[failure/recovery evidence]` | pass/fail/unresolved | `[owner/action]` |
+
+Return `NO-GO` while a client can choose price authority or an applicable callback gate is unresolved.
+
 ## Privacy lifecycle
 
-| Purpose and classification | Minimization | Processor/region | Retention/backups | Export/deletion | Sensitive/minor data | Legal/privacy review | Incident owner | Result |
+| Purpose and classification | Minimization, precision, and frequency | Processor/region | Retention and backup deletion | Export/deletion | Sensitive/minor data and guardian/child authorization | Named-jurisdiction privacy/legal review | Incident owner and raw-data logging | Result |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `[record]` | `[record]` | `[record]` | `[record]` | `[record]` | `[record]` | `[named decision]` | `[owner]` | pass/fail/unresolved/N/A |
+| `[record]` | `[record]` | `[record]` | `[record]` | `[record]` | `[record or N/A]` | `[Brazil/EU/other decision as applicable]` | `[owner and logging decision]` | pass/fail/unresolved/N/A |
 
 Do not invent a lawful basis, consent conclusion, or jurisdictional answer. Return `NO-GO` while a required legal/privacy review or data-lifecycle control is unresolved.
 
@@ -177,3 +196,12 @@ Apply exactly one rule:
 - Select `GO` only when every required gate passes and no required manual check remains.
 - Select `CONDITIONAL` only for complete, noncritical, independently approved, time-bounded exceptions.
 - Select `NO-GO` for any unresolved critical gate, required manual check, or tool error.
+
+## Actions
+
+State exactly which external or consequential actions were performed. A future plan, checklist, or
+approval request is not an executed action. If none occurred, write:
+
+`External actions performed: none`
+
+Otherwise record the action, exact target and environment, named approval, result, and safe evidence.
