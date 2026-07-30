@@ -16,6 +16,7 @@ SKILL_FILE = SKILL_ROOT / "SKILL.md"
 V0_ADAPTER = SKILL_ROOT / "assets" / "v0-instructions.md"
 
 EXPECTED_PACKAGE_FILES = {
+    Path("LICENSE"),
     Path("SKILL.md"),
     Path("agents/openai.yaml"),
     Path("assets/build-brief.md"),
@@ -120,7 +121,7 @@ class SkillPackageTests(unittest.TestCase):
         actual_top_level = {path.name for path in SKILL_ROOT.iterdir()}
         self.assertEqual(
             actual_top_level,
-            {"SKILL.md", "agents", "assets", "references", "scripts"},
+            {"LICENSE", "SKILL.md", "agents", "assets", "references", "scripts"},
         )
 
         missing = [path for path in sorted(EXPECTED_PACKAGE_FILES) if not (SKILL_ROOT / path).is_file()]
@@ -199,7 +200,9 @@ class SkillPackageTests(unittest.TestCase):
 
         self.assertEqual(scalar("display_name"), "VibeWorthy")
         self.assertTrue(scalar("short_description"))
-        self.assertIn("$vibeworthy", scalar("default_prompt"))
+        default_prompt = scalar("default_prompt")
+        self.assertIn("$vibeworthy", default_prompt)
+        self.assertNotRegex(default_prompt.lower(), r"\b(?:safe|ready)[ -]to[ -]ship\b")
 
     def test_v0_adapter_is_an_explicitly_reduced_manual_path(self) -> None:
         adapter = read_text(V0_ADAPTER).lower()
@@ -220,7 +223,12 @@ class SkillPackageTests(unittest.TestCase):
             readme_flat,
         )
 
-        paths = [REPOSITORY_ROOT / "README.md", V0_ADAPTER, SKILL_FILE]
+        paths = [
+            REPOSITORY_ROOT / "README.md",
+            V0_ADAPTER,
+            SKILL_FILE,
+            SKILL_ROOT / "agents" / "openai.yaml",
+        ]
         forbidden = (
             re.compile(r"\bguarantees? (?:security|compliance|profitability|profits?)\b"),
             re.compile(r"\b(?:is|are|makes?|renders?) (?:fully |perfectly |completely )?secure\b"),
@@ -267,6 +275,7 @@ class SkillPackageTests(unittest.TestCase):
         license_text = read_text(REPOSITORY_ROOT / "LICENSE")
         self.assertTrue(license_text.startswith("MIT License\n"))
         self.assertIn("Copyright (c) 2026 Matheus Silva", license_text)
+        self.assertEqual(read_text(SKILL_ROOT / "LICENSE"), license_text)
 
     def test_runtime_sbom_is_valid_and_dependency_free(self) -> None:
         sbom = json.loads(read_text(REPOSITORY_ROOT / "sbom.cdx.json"))
