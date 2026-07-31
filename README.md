@@ -155,6 +155,11 @@ provenance, or market evidence. It skips generated, vendor, binary, and oversize
 not transmit repository data. Run project-native tests, dedicated history and dependency checks, and
 the manual evidence gates described by the skill.
 
+The scanner does not implement complete Bash, Firebase Rules, or PostgreSQL grammars. It recognizes
+the bounded common forms covered by its fixtures and fails closed at enumerated ambiguous execution
+flows; unsupported policy or migration syntax remains unresolved and must be reviewed at the real
+enforcement boundary. A construct that produces no finding is not evidence that it is safe.
+
 The scanner reads a non-atomic view of the worktree. It rejects filesystem redirects and fails closed
 when it observes a root or file changing, but it cannot defeat a local process with write access that
 swaps and restores paths entirely between checks. Stop editors, generators, builds, and other writers

@@ -40,7 +40,8 @@ these primary sources, inspected on 2026-07-30:
 - [OWASP Top 10:2025](https://owasp.org/Top10/2025/) and
   [ASVS 5.0.0](https://owasp.org/www-project-application-security-verification-standard/)
 - [Firebase API keys](https://firebase.google.com/docs/projects/api-keys),
-  [Security Rules](https://firebase.google.com/docs/rules), and
+  [Security Rules](https://firebase.google.com/docs/rules),
+  [Rules language — allow](https://firebase.google.com/docs/rules/rules-language#allow), and
   [App Check](https://firebase.google.com/docs/app-check)
 - [Supabase API keys](https://supabase.com/docs/guides/api/api-keys) and
   [Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)

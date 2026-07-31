@@ -1,7 +1,7 @@
 ---
 spec: SPEC-VIBEWORTHY-V1-0001
 title: "VibeWorthy portable market, engineering, and security skill"
-status: ready
+status: implemented
 profile: critical
 mode: deliver
 owner: "dimidotdev"
@@ -118,11 +118,14 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 
 ## Current Behavior
 
-There is no VibeWorthy repository or installed skill. The source skills solve adjacent parts of the
-problem under different licenses and invocation models. Lovable and Bolt can import Agent Skills;
-v0 currently exposes reusable Instructions. The dimi.dev.br site has no VibeWorthy project entry or
-article. Users can therefore ask an agent to build quickly without receiving consistent demand,
-engineering, secret-management, data-isolation, and release gates.
+A complete VibeWorthy candidate now exists in a private canonical GitHub repository, including the
+Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
+license/provenance records, and release documentation. It remains private, untagged, and unreleased;
+the exact candidate has not yet completed cross-platform CI, independent exact-SHA review, the frozen
+21-response forward suite, public import checks, attestations, or durable release verification. The
+localized dimi.dev.br article/project is drafted but is not published in production D1 or deployed.
+The source skills still solve adjacent parts under different licenses and invocation models, while
+Lovable and Bolt can import Agent Skills and v0 currently exposes reusable Instructions.
 
 ## Proposed Behavior
 
@@ -268,20 +271,33 @@ while linking to the full references for manual use.
   per-object authorization, malformed/replayed input, output encoding, abuse, logging, and failure
   recovery map to tests rather than a generic “OWASP checked” statement.
 - AC-007 | REQ-007 | Given synthetic secrets, when all output formats run, then no matched value is
-  emitted. Reports identify file, line, rule, and remediation; release review also requires vault,
-  least-privilege, inventory/owner/expiry, short-lived identity where available, tested rotation/
-  revocation, audit, and history remediation evidence before closing suspected exposure.
+  emitted, including after source escaping, Unicode normalization, percent decoding, JSON/SARIF
+  serialization, or URI rendering of a report path. Reports identify file, line, rule, and
+  remediation; a path whose safe projection cannot be proven is replaced by an opaque location.
+  Release review also requires vault, least-privilege, inventory/owner/expiry, short-lived identity
+  where available, tested rotation/revocation, audit, and history remediation evidence before
+  closing suspected exposure.
 - AC-008 | REQ-008 | Given public and privileged backend keys, when reviewed, then unresolved trust
   evidence blocks shipping. Public-looking Firebase keys remain “external restriction unverified” and
   produce `NO-GO` until manually confirmed; service-account/`service_role` values and missing anonymous/
   A/B/admin denial evidence at public and privileged server/IAM boundaries block release across every
-  applicable storage/query/function boundary.
+  applicable storage/query/function boundary. The supplemental scanner blocks unconditional Firebase
+  grants plus constant-true grants it can prove through its bounded literal, list/membership,
+  comparison, boolean, ternary, and arithmetic grammar; dynamic or unsupported expressions remain
+  outside static proof and cannot supply release evidence. Executable PostgreSQL migration bodies
+  that disable RLS are blockers, including bounded literal adjacency/concatenation, grouping, and
+  identity text casts; comments and inert string/data bodies remain non-findings.
 - AC-009 | REQ-009 | Given lockfile conflict and an install script, when reviewed, then both issues are
   visible and installation is deferred until identity, necessity, permissions, and source are
   confirmed; a public-release review additionally records SBOM, vulnerability/KEV, pinning, patch SLA,
   provenance/signature, digest, exact evaluated-commit/annotated-tag identity, an attested checksum
   index over four named assets, the exact six-file workflow-managed durable release inventory, and CI
-  identity/branch-control evidence, and every enumerated failure condition produces `NO-GO`.
+  identity/branch-control evidence, and every enumerated failure condition produces `NO-GO`. Remote
+  fetch-to-execution flow remains visible through bounded shell aliases, functions, descriptors,
+  redirections, heredocs, wrappers, compound commands, native literal output names, and common
+  literal file consumers or transforms. Dynamic or unsupported relevant flow fails closed at a
+  potential consumer or transform while a download-only or inspection-only path remains a
+  non-finding.
 - AC-010 | REQ-010 | Given scanner fixtures, when run cross-platform, then output and exit codes are
   deterministic, schemas parse, the fixtures remain byte-identical, and text/JSON/SARIF expose the
   non-atomic snapshot limitation.
@@ -412,11 +428,14 @@ while linking to the full references for manual use.
 
 ## Rollout and Rollback
 
-- Rollout: complete license/source audit; pass a critical independent review; implement and forward-test
-  locally; create a public GitHub repository; run cross-platform CI; create annotated `v1.0.0` directly
-  on the exact evaluated commit; verify the tag target, checksums, attestations, durable release asset
-  set, Lovable/Bolt import shape, and v0 adapter manually; back up production D1; publish the localized
-  article/project; deploy the site; run production smokes.
+- Rollout: complete the license/source audit, implementation, local gates, and candidate review; commit
+  and push the exact candidate while the canonical GitHub repository remains private; pass
+  cross-platform CI and fresh independent reviews against that immutable commit; make the repository
+  public; pass the release-workflow dry-run and frozen 21-response forward suite against the same
+  commit; create annotated `v1.0.0` directly on that exact evaluated commit; verify the tag target,
+  checksums, attestations, durable release asset set, Lovable/Bolt import shape, and v0 adapter
+  manually; back up production D1; publish the localized article/project; deploy the site; run
+  production smokes.
 - Stop conditions: secret-like material in history or output, failed independent security review,
   invalid licensing/provenance, platform instructions contradicted by official docs, failing scanner
   redaction/mutation tests, failed site CI/migration, or unsupported security/readiness claims.
@@ -499,6 +518,23 @@ while linking to the full references for manual use.
   and missing external `github-release` environment/tag policy and real publication evidence. The
   next exact candidate requires fresh package review; external promotion controls remain a pre-tag
   gate. Evidence: `docs/audits/2026-07-30-candidate-e1b134f.md`.
+- AUDIT-HIST-013 | failed | The independent scanner audit rejected candidate
+  `c44f1d4561630c8a70ed949c7e995c1d726b1681` despite its green cross-platform CI matrix. It
+  reproduced bidirectional percent-encoding path disclosures, PostgreSQL wildcard RLS and Firebase
+  literal-tautology misses, lexical shell alias/function and dynamic-interpreter evasions, incorrect
+  multiple-heredoc ownership, and acceptance of non-standard JSON constants. The candidate remains
+  excluded from release and forward scoring. Evidence:
+  `docs/audits/2026-07-30-candidate-c44f1d4.md`.
+- AUDIT-HIST-014 | passed | The candidate-bound behavior audit of
+  `c44f1d4561630c8a70ed949c7e995c1d726b1681` passed 12 full-skill/reduced-v0 decisions with the
+  required identity, exact seven-column ledger, ownership, next actions, authority boundary, and
+  `NO-GO`. This historical pass is non-transferable and is not part of the final 21-response suite.
+  Evidence: `docs/audits/2026-07-30-candidate-c44f1d4.md`.
+- AUDIT-HIST-015 | passed | The candidate-bound package audit of
+  `c44f1d4561630c8a70ed949c7e995c1d726b1681` accepted CI, package identity, deterministic assets,
+  SBOM/checksum inventory, workflow hardening, and external release controls in isolated simulation.
+  No real OIDC rehearsal, tag, attestation, public import, or durable release was performed. This
+  historical pass is non-transferable. Evidence: `docs/audits/2026-07-30-candidate-c44f1d4.md`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -643,6 +679,24 @@ while linking to the full references for manual use.
   intent and fail closed when relevant parsing remains ambiguous. | rationale: syntax that preserves
   fetcher-to-interpreter flow cannot turn into a clean result merely because it is wrapped, redirected,
   nested, or launched by an unknown command. | affects: REQ-009, REQ-010, REQ-012
+- DEC-017 | Protect report paths across raw, NFC, safe-display, strict percent-decoding, and final URI
+  rendering projections, failing closed beyond four source encoding layers or a transform budget
+  breach. |
+  rationale: a serializer or downstream URI decoder must not recreate a detected value that was absent
+  from the pre-render display path; an opaque location is safer than an unverifiable partial location.
+  | affects: REQ-007, REQ-010, REQ-011
+- DEC-018 | Track bounded fetch aliases, function calls, literal and unknown file provenance, native
+  output names, and effective redirections within one execution scope; resolve alias/function chains
+  at call time within the symbol budget and consume all heredocs FIFO while executing only the
+  effective stdin body. | rationale: shell state and redirection ownership affect whether downloaded
+  bytes become code, but unbounded expansion or filesystem/symlink inference would create both
+  bypasses and misleading blockers. Dynamic or unsupported flow fails closed only when it reaches a
+  potential execution consumer or file transform. | affects: REQ-009, REQ-010, REQ-012
+- DEC-019 | Keep Firebase constant evaluation and PostgreSQL dynamic-SQL projection to explicit,
+  bounded grammars instead of claiming complete language interpretation. | rationale: the scanner is
+  a deliberately small heuristic preflight; unsupported expressions remain unresolved and the
+  independent authorization/migration review gate still blocks release, while only statically proven
+  unsafe forms become scanner findings. | affects: REQ-008, REQ-010, REQ-011, REQ-012
 
 ## Open Questions
 
