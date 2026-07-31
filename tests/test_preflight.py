@@ -452,7 +452,10 @@ class PreflightTests(unittest.TestCase):
         scanner = load_scanner_module()
         fixture = RepositoryFixture(self)
         synthetic_value = "ghp_" + ("A" * 36)
-        source_escaped_name = synthetic_value.replace("_", r"\u005f")
+        # Percent-encode the backslash so the on-disk fixture is valid on
+        # Windows while URI decoding followed by source decoding still
+        # reconstructs the protected value.
+        source_escaped_name = synthetic_value.replace("_", r"%5Cu005f")
         fixture.write("config.env", f'password="{synthetic_value}"\n')
         fixture.write(source_escaped_name, synthetic_cloud_key() + "\n")
 
