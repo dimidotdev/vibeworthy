@@ -116,8 +116,28 @@ versions; and test, build, or scan outcomes. Match each claim to an adequately s
 record. Attribute output and exit status only to the exact call that captured them. A compound,
 failed, interrupted, or partial call proves only what its record explicitly contains, and an
 `absent` or `only` claim requires an inspection whose scope could have found the exact item.
+Claim that a directory entry does not exist only after a non-following metadata lookup such as
+`lstat`/`lexists` or a platform equivalent, or an exact parent-entry enumeration, specifically reports
+nonexistence. A failed content read, `test -f`, or glob may instead mean a broken symlink, directory,
+non-regular file, access denial, case mismatch, or exclusion. Report that exact state or `unverified`,
+not `absent`.
 For current-state claims, that inspection must follow the last relevant recorded mutation; otherwise
 qualify when the state was observed or mark it `unverified`.
+
+Aggregate scan counts, a clean finding summary, or silence do not prove a named path present or
+absent. Complete command output remains available even without a separately saved file. A record
+marked truncated, interrupted, or partial proves only visible fields; missing report fields, coverage,
+or exit remain unavailable and the result unresolved. Keep user-provided and artifact-reported facts
+labeled and never call them automated evidence. Bound negative action claims exactly: if a local
+verification script ran, do not say “no scripts executed”; say no dependency install, lifecycle, or
+remote script ran when that narrower statement is true.
+
+Never scan a directory equal to or containing current-session outputs. Unless the host explicitly
+supplies a complete output-path inventory elsewhere, treat the physical current working directory as
+an output location. Canonicalize an existing directory target and known outputs before comparing
+ancestry; if resolution or inventory is incomplete, scan only an explicit stable input file or defer.
+An invalid or ancestry-unverified scan is `tool error`/`unresolved`, never an automated pass, even with
+exit `0` or a clean report.
 
 If the record does not establish a claim, remove it or write `not inspected` or `unverified`. Never
 infer that something ran, failed, emitted output, returned an exit code, was absent, or was the only
@@ -136,6 +156,12 @@ instead of omitting a value. Then print this Markdown ledger with these exact co
 | Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |
 | --- | --- | --- | --- | --- | --- | --- |
 | `[automated pass / failure / tool error / manual check / residual risk / exception]` | `[one gate or fact]` | `[pass / fail / tool error / unresolved / accepted]` | `[observed artifact or missing evidence]` | `[specific remaining risk or none observed in scope]` | `[named person/role or unknown]` | `[specific next action or none]` |
+
+Use those evidence classes exactly. Reserve `automated pass` for a complete, valid automation record
+whose protocol and coverage tested that exact gate. Put an invalid or ancestry-unverified scan under
+`tool error`/`unresolved`. Put a user- or artifact-reported blocking condition under `failure` and
+label its source in Evidence; never call it `automated failure`. Use `manual check`/`unresolved` for
+missing or untested evidence. A clean scanner does not automate an unrelated control.
 
 Replace the example row; never leave placeholders. Bullets, prose, or a blocker list do not replace
 this ledger, even when the user asks for brevity. Give every distinct failure, tool error, required

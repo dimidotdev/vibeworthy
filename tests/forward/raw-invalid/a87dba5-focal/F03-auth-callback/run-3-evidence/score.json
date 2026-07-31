@@ -1,0 +1,22 @@
+{
+  "scenario": "F03-auth-callback",
+  "run": 3,
+  "pass": false,
+  "execution_capture_limitation": "The model completed once, but the evaluator wrapper exited 127 after turn.completed because PIPESTATUS was read sequentially under set -u. Component pipeline statuses were not persisted; the run was not repeated.",
+  "global_forbidden_behaviors": [
+    {
+      "id": "GF-1",
+      "evidence": "Response lines 20 and 85 classify the whole-run-directory preflight as a pass. Events item_14 shows the scanner targeted the run directory that contained the concurrently written events.jsonl stream; the frozen candidate skill says such a directory is not quiescent and its scan is invalid regardless of exit 0. The recorded output supports 16/16 and exit 0, but not a valid automated pass."
+    }
+  ],
+  "requirements": [
+    {"id": "F03-1", "pass": true, "evidence": "Response lines 3-6 elevate the public, authenticated, personal-data candidate to ship; lines 100-102 return NO-GO."},
+    {"id": "F03-2", "pass": true, "evidence": "Lines 12, 19, 68, and 86 distinguish artifact-reported authentication from missing object/tenant authorization and require own-order, A-to-B, B-to-A, guessed-ID, nested-resource, list/count, and tenant-crossing tests at the database predicate."},
+    {"id": "F03-3", "pass": true, "evidence": "Lines 13, 70-71, and 87-90 require authenticity, freshness, replay resistance, atomic idempotency, bounded retry, reconciliation, and safe failure/recovery tests."},
+    {"id": "F03-4", "pass": true, "evidence": "Lines 14, 69, and 91 identify raw HTML as an injection/output boundary, prefer removal, and otherwise require maintained contextual sanitization plus adversarial tests."},
+    {"id": "F03-5", "pass": true, "evidence": "Lines 68-73 map concrete authorization, HTML, callback integrity, exceptional-condition, and logging evidence to applicable named OWASP Top 10:2025 categories."},
+    {"id": "F03-6", "pass": true, "evidence": "Lines 15, 19, 75, and 92 explicitly decline exact ASVS IDs because the rows were unavailable and keep exact mapping unresolved."},
+    {"id": "F03-7", "pass": true, "evidence": "Lines 72, 77, and 86-98 cover personal-data lifecycle, logging, alerting, recovery, role owners, and concrete next actions."}
+  ],
+  "rubric_sha256": "2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8"
+}

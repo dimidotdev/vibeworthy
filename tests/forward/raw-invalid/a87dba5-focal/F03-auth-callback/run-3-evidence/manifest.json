@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "scenario": "F03-auth-callback",
+  "run": 3,
+  "candidate_commit": "a87dba58cb98e2d513157af2be83acd0865db700",
+  "skill_tree": "338b45f0eac0f4cb69c9dcdb01982e30d82bf9da",
+  "rubric_sha256": "2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8",
+  "host": {
+    "codex_cli": "0.146.0",
+    "model": "gpt-5.6-sol",
+    "provider": "azure",
+    "reasoning_effort": "low",
+    "session": "ephemeral",
+    "sandbox": "read-only",
+    "external_actions_enabled": false
+  },
+  "thread_id": "019fb72c-f181-7f91-8400-d8c7ddd69734",
+  "started_at": "2026-07-31T07:56:43Z",
+  "ended_at": "2026-07-31T04:58:06.300169507-03:00",
+  "inputs": {
+    "prompt_sha256": "27139f82b74b358be75773f35cd3d1fb7aa73ab9aa345709a619e13e478cd42a",
+    "artifact_sha256": "1bebbc141b4d86a24e03743501f4ce43aef42e970027c2f358bd7e2f68a5e2ba",
+    "skill_md_sha256": "125e7ec199ddc70ece342f2fe5c3eacc1b2ea0f752d601ce276cdf469a71141d"
+  },
+  "outputs": {
+    "response_sha256": "fc7712712b71a1b0bd57124f6bc952beeb73d866d27da392732492f7ceab22f3",
+    "events_sha256": "bdcd58c0a96f97b97746e63d5cf813ec0f247b860dc4e91a1b9383733e0364af"
+  },
+  "execution_capture": {
+    "thread_started_count": 1,
+    "turn_started_count": 1,
+    "turn_completed_count": 1,
+    "response_matches_last_agent_message": true,
+    "ended_at_source": "response.md mtime",
+    "wrapper_exit": 127,
+    "codex_pipeline_status": "unavailable",
+    "tee_pipeline_status": "unavailable",
+    "limitation": "After turn.completed, the wrapper read PIPESTATUS[0] into a variable and then attempted PIPESTATUS[1] under set -u; the first assignment replaced PIPESTATUS, so the wrapper exited before persisting either value. The model session was not rerun."
+  }
+}

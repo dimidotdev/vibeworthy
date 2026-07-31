@@ -13,6 +13,8 @@ Turn an idea or change into evidence that it is worth building, maintaining, tru
 - Never claim perfect security, OWASP or ASVS compliance, profitability, certification, or production readiness from this workflow, a checklist, or a scan.
 - Never invent interviews, demand, analytics, test results, control coverage, cloud settings, or approvals. Label each item as observed evidence, user-provided evidence, assumption, proposed test, or unresolved check.
 - Never turn user-provided, artifact-reported, planned, or uninspected statements into observed workspace facts.
+- Never label user-provided or artifact-reported facts as automated evidence. Reserve `automated` for the exact result of a completed tool record.
+- Output displayed in a completed tool record is available evidence even when it was not separately saved to a file; do not relabel it unavailable.
 - Treat generated code and generated tests as proposals. Require a named human review and independent negative evidence for generated authorization, Security Rules, RLS, IAM, migrations, cryptography, authentication, payment, or destructive-data logic before release.
 - Resume from recorded evidence after interruption; do not silently discard earlier scope, failures, or decisions.
 
@@ -163,64 +165,85 @@ Before drafting the final response:
    the exact tool call, and to an inner program only when the record makes that source explicit. A
    compound, failed, interrupted, or partial call proves only the facts it explicitly captured. A
    file-absence or “only” claim requires a completed inspection whose scope could have found the
-   exact item; a failed read proves absence only when its record identifies that exact path as
-   missing. A current-state claim requires an inspection after the last relevant recorded mutation;
-   otherwise qualify when it was observed or mark it `unverified`.
+   exact item. To claim that a directory entry does not exist, require a non-following metadata lookup
+   such as `lstat`/`lexists` or a platform equivalent, or an exact parent-entry enumeration, whose
+   completed result specifically establishes nonexistence. A failed content read, `test -f`, or glob
+   does not distinguish an absent entry from a broken symlink, directory, non-regular file, access
+   denial, case mismatch, or excluded result. Report those states exactly as `broken symlink`, `not a
+   regular file`, `not readable`, or `unverified`; do not collapse them into `absent`. A current-state
+   claim requires an inspection after the last relevant recorded mutation; otherwise qualify when it
+   was observed or mark it `unverified`. Aggregate scan counts, a clean finding summary, or silence do
+   not prove that a named path is present or absent.
 3. If the record does not prove the claim, remove it or label it `not inspected` or `unverified`.
    Never infer `ran`, `failed`, `emitted`, `exit <code>`, `absent`, or `only` from prompt silence,
    expected behavior, user-provided text, an artifact's narrative, or another invocation. Keep
-   user-provided and artifact-reported facts labeled as such.
+   user-provided and artifact-reported facts labeled as such. Bound negative action statements to
+   their exact category: if a local verification script ran, do not say “no scripts executed”; say
+   that no dependency install, lifecycle, or remote script ran when that narrower claim is true.
 4. Recheck every factual claim in prose, tables, the evidence ledger, and `Actions` against this
    inventory before sending. Resolve contradictions in favor of the completed record and preserve
    failures, partial results, and uncertainty.
 
-Inspect the bundled [preflight scanner](scripts/preflight.py), review its help, and run it locally
-against the bounded project root with an actually available Python 3.11+ interpreter and isolated
-mode—for example, `python3 -I scripts/preflight.py <project-root> --format text` on POSIX or
-`python -I scripts/preflight.py <project-root> --format text` on Windows. The isolated-mode flag is
-mandatory: without it, Python startup or imports can execute project-controlled code before the
-scanner begins. Record only commands that were actually executed and only results and exit codes
-present in their captured output. Never infer that another launcher was unavailable, failed, or
-returned a particular exit code merely because a different launcher was selected. Reconcile every
-narrative claim and evidence-ledger entry about a tool call with its completed command record. For
-each scanner or verification used as evidence, preserve the observed report or result and exit code,
-including tool errors; never claim that output or an exit code was absent when the record contains
-it. Treat scanner output as heuristic worktree evidence, not proof about Git history, submodules,
-dependencies, cloud configuration, or runtime behavior. Keep automated passes, failures, tool
-errors, and manual checks separate. Never convert a tool error or unperformed manual check into a
-pass, and never let a later narrow pass overwrite an earlier broader failure or invalid result.
+For routine use of an already reviewed package, review the bundled [preflight scanner](scripts/preflight.py)
+help; do not load its entire implementation into task context unless installing, changing, or auditing
+the scanner itself. Run it only when a safe, bounded target already exists. Never run it merely to
+fill a checklist or ledger; defer when no safe target exists. Use an actually available Python 3.11+
+interpreter in isolated mode—for example, `python3 -I scripts/preflight.py <safe-target> --format
+text` on POSIX or `python -I scripts/preflight.py <safe-target> --format text` on Windows. Without
+`-I`, Python startup or imports can execute project-controlled code before the scanner begins.
+
+Record only commands actually executed and results and exit codes in their completed records. Never
+infer that another launcher was unavailable, failed, or returned an exit merely because a different
+launcher was selected. Output shown in a completed record is captured evidence even if no separate
+report file exists, but a truncated, interrupted, or partial record proves only its visible fields;
+missing report fields, coverage, or exit remain unavailable and the overall result is unresolved.
+Treat scanner output as heuristic worktree evidence, not proof about Git history, submodules,
+dependencies, cloud configuration, runtime behavior, or named paths omitted by its aggregate summary.
+Keep automated passes, failures, tool errors, and manual checks separate. Never convert a tool error
+or unperformed manual check into a pass, and never let a later narrow pass overwrite an earlier
+broader failure or invalid result.
 
 Run the scanner only while the target is quiescent. It reads a non-atomic worktree view: it rejects
 redirects and fails closed on changes it observes, but it cannot defeat a local writer that swaps and
-restores paths entirely between checks. A directory whose contents are still being written by a
-running command—for example, a live event stream, transcript, response file, or build output—is not
-quiescent; do not scan that directory as a whole. Scan a stable bounded artifact or an isolated
-candidate copy, or defer the scan. Report narrower coverage explicitly rather than presenting it as
-equivalent to the workspace. For release evidence, scan an isolated checkout on a trusted runner
-with no editor, generator, build, or other concurrent writer; otherwise record the scan as invalid
-rather than clean.
+restores paths entirely between checks. A directory that contains or will contain any current-session
+event stream, transcript, response, log, or build output is not quiescent for that entire session,
+even when its writer appears idle; do not scan that directory as a whole. Scan a stable bounded input
+file or an isolated candidate copy, or defer. Report narrower coverage explicitly rather than
+presenting it as equivalent to the workspace. For release evidence, scan an isolated checkout on a
+trusted runner with no editor, generator, build, or other concurrent writer; otherwise record the
+scan as invalid rather than clean.
 
 Use this protocol whenever a scan is executed or attempted, whether or not its result is later cited
 as evidence:
 
 1. Establish the target before invocation. Never scan any directory while a command, agent runtime,
-   or other process writes anywhere inside it. The default `.` is prohibited unless it is an isolated
-   checkout or candidate copy already proven quiescent. If the current session writes an event
-   stream, transcript, response, or log in the working directory, select an explicit stable file or
-   separate candidate path, or defer the scan.
+   or other process writes anywhere inside it. Unless the host explicitly supplies a complete inventory
+   of output paths outside the workspace, treat the physical current working directory as a session-output
+   location. Resolve an existing directory target and known output paths to physical canonical
+   paths before comparing ancestry. A directory equal to or containing the working directory or any
+   event stream, transcript, response, log, or build output is prohibited for the whole session,
+   whether named as `.`, an absolute path, a parent, alias, or symlink. If path resolution or the
+   output inventory is incomplete, do not scan a directory. Do not claim a candidate is isolated
+   without that comparison. Select an explicit stable input file, a physically separate output-free
+   candidate, or defer; do not attempt a prohibited scan and relabel it later.
 2. Make the scanner the only substantive command in its tool call. Do not place it in a compound
    `cat`/`find`/`sed`/scanner command list or hide its output with a pipe, substitution, or redirection.
 3. After each attempt, inspect the completed command record. Preserve whichever of the scanner's
    rendered report and process exit code is present; mark each missing component individually as
    `report: unavailable` or `exit code: unavailable`. If either is unavailable, record `result:
    unresolved`; never reconstruct a result from a hash, file metadata, another invocation, or
-   expectation. Coverage comes from the report: when the report is unavailable, also record
-   `coverage: unavailable`; the requested target alone does not establish what was scanned.
+   expectation. Complete displayed command output counts as the report without a separately saved
+   file. When the record is marked truncated, interrupted, or partial, use only the exact visible
+   fields; if the full report fields or exit are not visible, mark them and coverage unavailable and
+   keep the result unresolved. Coverage comes from the full report; the requested target alone does
+   not establish what was scanned.
 4. Account for every scan attempt in the final response with its target, coverage, result, and exit
-   code, using those unavailable sentinels when necessary. A scan of a directory with an active
-   writer is invalid regardless of exit `0` and must remain visible beside any later, narrower valid
-   scan. A `--help` or `--version` call is metadata rather than a scan attempt; if cited, report only
-   the output and exit actually present in its completed record.
+   code, using those unavailable sentinels when necessary. Any scan that violates step 1, including
+   an ancestry-unverified directory scan, is invalid regardless of exit `0` or a clean report. Put it
+   in the ledger as `tool error` with result `unresolved`, never `automated pass`, preserve its observed
+   report and exit as unusable evidence, and keep it visible beside any later narrower valid scan. A
+   `--help` or `--version` call is metadata rather than a scan attempt; if cited, report only the output
+   and exit actually present in its completed record.
 
 For public release, also require relevant authorization matrices, secret-history review, privacy review, dependency and known-exploited-vulnerability review, transitive SBOM, immutable automation pins, artifact provenance or signature, digest verification, backup/restore evidence, migration recovery, alert ownership, and containment. Record required evidence not supplied or inspected as `not provided` or `unverified`; claim filesystem absence only after an adequately scoped completed inspection.
 
@@ -243,6 +266,13 @@ Then print this Markdown ledger with these exact columns:
 | Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |
 | --- | --- | --- | --- | --- | --- | --- |
 | `[automated pass / failure / tool error / manual check / residual risk / exception]` | `[one gate or fact]` | `[pass / fail / tool error / unresolved / accepted]` | `[observed artifact or missing evidence]` | `[specific remaining risk or none observed in scope]` | `[named person/role or unknown]` | `[specific next action or none]` |
+
+Use those evidence classes exactly. `automated pass` requires a complete, valid automation record
+whose protocol and coverage tested that exact gate. An invalid or ancestry-unverified scan is `tool
+error`/`unresolved`, never a pass. A blocking condition stated only by the user or a narrative artifact
+uses `failure` with `user-provided:` or `artifact-reported:` in the Evidence cell, never `automated
+failure`. Missing or untested evidence uses `manual check` with an unresolved result; a clean scanner
+cannot automate an unrelated control.
 
 Replace the example row; never leave placeholders. Bullets, prose, a blocker list, or the full template
 do not replace this ledger, even when the user asks for brevity. Give every distinct failure, tool
@@ -276,8 +306,9 @@ Do not omit a required field; use `unknown`, `unresolved`, or `not applicable �
 5. `Trust` — boundaries, OWASP/ASVS mappings, privacy/secrets/backend/supply-chain status, and blockers.
 6. `Release` — mandatory release identity, the exact seven-column ledger from section 7, and `GO`,
    `CONDITIONAL`, or `NO-GO` when a release decision was requested; bullets never replace the ledger.
-7. `Actions` — state exactly which external or consequential actions were performed. If none, write
-   `External actions performed: none`.
+7. `Actions` — state exactly which external or consequential actions were performed. Keep negative
+   claims narrow enough to remain true when local verification commands ran. If no external or
+   consequential action occurred, write `External actions performed: none`.
 
 In every `explore` or `prototype` Evidence section, use these explicit labels: `First cohort`,
 `Channel owner`, `Access mechanism`, `Handoff/message`, `Friction`, `Activation`, `Proposed threshold
@@ -302,7 +333,7 @@ Load only the resource needed for the current stage:
 - [Security and privacy](references/security-privacy.md) — use for authority, MCP, OWASP Top 10:2025, ASVS 5.0.0, secrets, privacy, and human review.
 - [Backends, supply chain, and release](references/backends-supply-release.md) — use for Firebase, Supabase, dependency integrity, operations, and release decisions.
 - [Platform compatibility](references/platform-compatibility.md) — use before installing, importing, or claiming host behavior.
-- [Preflight scanner](scripts/preflight.py) — inspect and run locally as supplemental worktree evidence; do not treat it as a release verdict.
+- [Preflight scanner](scripts/preflight.py) — run only against a safe bounded target as supplemental worktree evidence; inspect source when installing, changing, or auditing it, and never treat output as a release verdict.
 - [Build brief template](assets/build-brief.md) — copy before implementation.
 - [Release evidence template](assets/release-evidence.md) — copy before a release recommendation.
 - [Reduced v0 instruction](assets/v0-instructions.md) — paste into v0 Instructions; treat it as reduced manual guidance, not full-skill parity.

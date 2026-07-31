@@ -24,38 +24,35 @@ belong in `raw-final/`; they do not replace either class of failure evidence.
 
 ## Reproduction command
 
-The candidate evaluation uses Codex CLI in a disposable checkout. Run this from one isolated
-scenario directory so the response and complete JSONL event stream stay together:
+The candidate evaluation uses Codex CLI in a disposable checkout. From an isolated scenario
+directory containing fresh `prompt.md` and `ARTIFACT.md`, run the reviewed repository's single-session
+capture program:
 
-```sh
-codex --version | tee codex-version.txt
-set -o pipefail
-codex exec --ephemeral --ignore-rules --skip-git-repo-check \
-  --sandbox read-only --color never --json \
-  --model gpt-5.6-sol --config 'model_reasoning_effort="low"' \
-  --output-last-message response.md - < prompt.md | tee events.jsonl
+```bash
+python3 /path/to/reviewed-vibeworthy/tests/forward/run_codex_session.py
 ```
 
-Capture the Codex thread ID from the `thread.started` event instead of recording a PTY or shell
-process identifier:
+The runner invokes exactly one `codex exec` with `--json`, `--model gpt-5.6-sol`, and
+`--config 'model_reasoning_effort="low"'`; it uses direct subprocess streams rather than a shell,
+pipeline, or `tee`. `--codex-bin /reviewed/path/to/codex` selects an explicit executable when needed.
+It acquires an exclusive run lock and refuses to start when the lock or any capture output already
+exists, so concurrent or sequential attempts cannot silently rerun or overwrite a session.
 
-```sh
-python3 - <<'PY'
-import json
-from pathlib import Path
+The runner preserves `events.jsonl`, `response.md`, `codex-stderr.txt`, `evaluator-stderr.txt`, exact
+Codex and evaluator status files, version, timestamps, and `thread-id.txt` from the sole Codex
+`thread.started` event. It requires exactly one thread and turn, a final `turn.completed`, and an exact
+match between `response.md` and the last completed agent message. `session-capture.json` records those
+relationships and hashes `prompt.md`, `ARTIFACT.md`, response, events, and Codex stderr.
+Input hashes are captured before invocation and verified again afterward; a changed prompt or artifact
+is an evaluator failure rather than evidence for the original input.
 
-events = [json.loads(line) for line in Path("events.jsonl").read_text(encoding="utf-8").splitlines()]
-thread_ids = {
-    event["thread_id"]
-    for event in events
-    if event.get("type") == "thread.started" and event.get("thread_id")
-}
-if len(thread_ids) != 1:
-    raise SystemExit(f"expected one Codex thread ID, found {len(thread_ids)}")
-Path("thread-id.txt").write_text(next(iter(thread_ids)) + "\n", encoding="utf-8")
-PY
-```
+Codex and evaluator failures remain separate. When structural capture succeeds, the runner returns
+Codex's exact exit status. When capture/validation fails, it returns the evaluator status while keeping
+`cli-exit-code.txt` and `codex-stderr.txt`; diagnostics go to `evaluator-stderr.txt`. Never rerun or
+replace either result. An evaluator interrupt records status 130 instead of a false success.
 
 Record the exact CLI version, model, provider, candidate commit, skill tree, prompt/artifact hashes,
 thread ID, start/end timestamps, and response hash in the result manifest. Host defaults outside
-those recorded values are not assumed to be portable.
+those recorded values are not assumed to be portable. Build and score the result only from the
+preserved capture; if later manifest/scoring assembly fails, retain its own status and stderr without
+modifying or replacing the session.

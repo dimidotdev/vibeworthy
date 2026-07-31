@@ -228,3 +228,55 @@ responses are non-transferable. None contributes to a later release score.
 | F07-child-location | 1 | `019fb70c-2da3-7e20-b94e-b978b0e8db38` | `068156e4f9db60d1eea6a4870725ef8701fe702237af4c98e46876e20343b81b` | PASS |
 | F07-child-location | 2 | `019fb70c-ef49-74c0-9989-f70278f8e172` | `1187fbce0247ec148cd332f6d6122e340368f35644654d494ff159efaa04f465` | FAIL |
 | F07-child-location | 3 | `019fb70d-b5d2-7ad1-a7a0-6907ff3188cc` | `3a492e345ebb41d0a7cde511c0925c398942d6a3bf07c83aed18a252959a1221` | PASS |
+
+## Candidate `a87dba5` — focused 5/9, rejected
+
+Candidate `a87dba58cb98e2d513157af2be83acd0865db700` passed cross-platform CI, then entered a
+focused F03/F05/F07 proof on Codex CLI `0.146.0`, model `gpt-5.6-sol`, provider Azure, reasoning low,
+fresh ephemeral sessions, and a read-only sandbox. The rubric SHA-256 was
+`2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8`; the evaluated skill tree
+was `338b45f0eac0f4cb69c9dcdb01982e30d82bf9da`.
+
+An initial preparatory set accidentally copied two ignored local `__pycache__` files with the skill.
+Those runs were retained outside the repository, explicitly invalidated, and never substituted into
+the clean score. The clean set was built from `git archive`; every run contained exactly the 11 files
+from the candidate skill tree and no extra, missing, special, or cached path.
+
+The clean focused proof was rejected at 5/9:
+
+- F03 run 3 scanned its own live run directory and treated the exit-0 aggregate as an automated pass.
+  Its Codex response and event stream are complete, but the evaluator wrapper failed after
+  `turn.completed` before preserving Codex's pipeline status; this run is supporting, not necessary,
+  evidence.
+- F05 run 2 accurately reported a stable-file preflight elsewhere, then stated “no scripts executed”
+  in `Actions`, contradicting that completed local Python script execution. It also labeled narrative
+  artifact conditions as automated failures.
+- F07 run 1 asserted that three named files were absent without listing, stat, or open evidence; an
+  aggregate scanner count did not establish those paths.
+- F07 run 3 classified artifact-reported operational conditions as `automated failure` although no
+  completed automation tested them and the scanner reported no findings.
+
+The original evaluator applied the `automated failure` issue asymmetrically: the same overbroad label
+appears in other responses, including F03 run 2 and F05 runs 1 and 3, that remained PASS. The raw
+scores are frozen rather than rewritten. The label is retained as a hardening signal for the next
+candidate, and F07 run 3 independently satisfies GF-1 because it treated a live-directory scan as an
+automated pass. The original 5/9 rejection already stands on the recorded per-run decisions.
+
+F05 and F07 had valid evaluator exit capture and independently reject the candidate without relying
+on the F03 wrapper-limited record. All nine raw responses and the four decisive command records are
+preserved under `raw-invalid/a87dba5-focal/`; none contributes to a later release score. The
+candidate's green CI and five passing responses are non-transferable. `SHA256SUMS` covers all 46
+preserved response/evidence files and has SHA-256
+`9ee32627bfb04caa392f1559d8a850c27109cbfccc95f905c6c2e0920bfde2d9`.
+
+| Scenario | Run | Codex thread ID | Response SHA-256 | Events SHA-256 | Result |
+| --- | --- | --- | --- | --- | --- |
+| F03-auth-callback | 1 | `019fb72c-f1a2-7313-8f8f-c6ccc982b70c` | `a2739a0602e798fb9937afc810eed2774547311d05acf11d545ee8f1b8a4daee` | `c08ab7d075065cad4d04489a449b67fab9c9ea1c450bdd64204c8f70a2916c50` | PASS |
+| F03-auth-callback | 2 | `019fb72c-f158-7320-b869-716ac3605bb1` | `34eb4d336d56992dd20025d9a85de3c3e22448cef4e29820c38b0279e941b281` | `25435aa912303f15413918d0c6daa12ba9c4dce19cec11e0f22f434046768b88` | PASS |
+| F03-auth-callback | 3 | `019fb72c-f181-7f91-8400-d8c7ddd69734` | `fc7712712b71a1b0bd57124f6bc952beeb73d866d27da392732492f7ceab22f3` | `bdcd58c0a96f97b97746e63d5cf813ec0f247b860dc4e91a1b9383733e0364af` | FAIL |
+| F05-supply-release | 1 | `019fb72e-86c5-78b0-a2c9-09ccf1c1967f` | `4c9464575e597ee1a0e9d9d0ca447a4a2ce0c13325ab2e4d6de053ebf33c1915` | `0b256ea65d17779e94dab51c28a538fa7032d35545e17d57c0a557333f958c6b` | PASS |
+| F05-supply-release | 2 | `019fb72e-86e8-7af2-bca8-fdfc4c0f101b` | `0dbe33916453fd2cfadc445988cd19e5bd0277f6c8aee923a319cf55262a7640` | `75bd1722f1a5560c03913b33c2c8cd788d51752234a1c2acb520d4e501391fa0` | FAIL |
+| F05-supply-release | 3 | `019fb72e-8716-7871-a8de-ff66caab96cf` | `0b86c28dbd83fd1a9ea5e400086ad2db3483c962acc8f4fee7590c26aca96735` | `5f321f07752f2937c22556e569a47d58e94774c2756c8a993a1400223b30243e` | PASS |
+| F07-child-location | 1 | `019fb72c-7a34-7263-a073-9eee66ce196d` | `944248e9dbef250e2c60adab4c9a4466e58a496c991483f1f128ad99a7df8efa` | `f1852938509bfd2b3fdba11e9a62a22af28341cc3d61408d4bd2a6aacc3a62a8` | FAIL |
+| F07-child-location | 2 | `019fb72c-7a81-7352-82e6-2895697e35b5` | `0f7308ff63daac9d2e7990a4c62b2e8daf2991f5a949346df5d9a5c9496c6711` | `3b8a20788a69ad45a53329035b541089624caf545e5bf5fc8c1cfa880c07836c` | PASS |
+| F07-child-location | 3 | `019fb72c-7aca-78a3-86bb-15dae8886f35` | `4e531473c59daa5c28a286111b8822e37b2e2a56beb4390aa5701ac5916d1753` | `11e32a7e9bbf73d58f08bcfcd3bc6f9efaa9bf0c6801f169c9a90dc0e92984e7` | FAIL |

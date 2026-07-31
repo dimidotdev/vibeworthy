@@ -121,6 +121,12 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 A complete VibeWorthy implementation now exists in the public canonical GitHub repository, including
 the Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
 license/provenance records, and release documentation. Candidate
+`a87dba58cb98e2d513157af2be83acd0865db700` passed cross-platform CI but was rejected by a
+clean focused F03/F05/F07 proof at 5/9. Responses still scanned their own live run directory,
+inferred named-file absence from aggregate scanner counts, called artifact narratives automated
+failures, or made an overbroad “no scripts executed” claim after running preflight. An earlier
+preparatory set for the same commit contained ignored local bytecode and was excluded rather than
+substituted. Candidate
 `f0b31e2fb95e677ba0c99c336a38cd80129aad8e` passed its focused F05 scanner proof,
 cross-platform CI, and release rehearsal, but its fresh full suite was rejected at 18/21. One response
 invented scanner diagnostics, another invented a Git invocation and exit code, and a third claimed
@@ -270,6 +276,27 @@ while linking to the full references for manual use.
   explicitly captured facts; unsupported claims shall be removed or labeled `not inspected` or
   `unverified`, user-provided or artifact-reported statements shall remain distinctly labeled, and
   current-state claims shall follow the last relevant recorded mutation or carry a time qualifier.
+  Aggregate scan counts shall not prove named-path presence/absence; automated evidence shall require
+  a completed tool record for that exact gate; and negative action claims shall remain narrowly true
+  when local verification commands ran. A directory-entry absence claim shall require a non-following
+  metadata lookup or exact parent-entry enumeration that specifically establishes nonexistence; failed
+  reads, regular-file predicates, globs, broken links, wrong types, access denials, case mismatches, and
+  excluded results shall not be collapsed into absence.
+- REQ-023 | must | Routine agent use of the preflight shall inspect help without loading the complete
+  implementation unless installing, changing, or auditing it; shall defer when no safe target exists;
+  and shall never scan a directory equal to or containing current-session outputs, regardless of
+  relative, absolute, parent, alias, or symlink spelling. In the absence of a complete host-provided
+  output inventory, the physical current working directory shall be treated as an output location;
+  directory targets and outputs shall be canonicalized before ancestry comparison, and unresolved
+  ancestry shall fail closed to a stable file or deferral. Complete displayed-command output shall
+  remain available without a saved report, while marked partial/truncated records shall establish only
+  visible fields. Invalid scans shall be `tool error`/`unresolved`, never an automated pass.
+- REQ-024 | must | The forward-evaluation runner shall invoke exactly one Codex session without a
+  shell pipeline, acquire an exclusive lock, refuse concurrent or sequential overwrite, preserve Codex
+  and evaluator stderr/status separately, verify input hashes before/after execution, and validate one
+  thread/turn plus exact final-response identity before producing output hashes. An evaluator failure
+  or interrupt shall remain distinct from the preserved Codex result and shall never trigger a
+  replacement run.
 
 ## Acceptance Criteria
 
@@ -361,7 +388,23 @@ while linking to the full references for manual use.
   contain no adequately scoped file inspection, when a response is drafted, then it does not claim
   that the command ran or returned an exit, that the diagnostic was emitted, or that a file was absent.
   It instead preserves the source label and uses `not inspected` or `unverified` where appropriate in
-  prose, tables, release ledgers, and action summaries.
+  prose, tables, release ledgers, and action summaries. Aggregate counts do not establish named-file
+  absence; narrative facts are not called automated; and “no scripts executed” is absent when a local
+  preflight script ran. A failed read, `test -f`, or glob does not support `absent`; the response uses
+  a non-following metadata lookup or exact parent-entry enumeration and distinguishes nonexistence from
+  broken symlink, wrong type, access denial, case mismatch, exclusion, and unverified state.
+- AC-023 | REQ-023 | Given a run directory containing an active `events.jsonl`, response, or transcript,
+  when preflight is considered, then the agent scans only an explicit stable input file or a separate
+  output-free isolated candidate, or defers. It never scans that live directory through any spelling,
+  defaults the physical working directory to output-tainted when the host inventory is incomplete,
+  canonicalizes paths before ancestry comparison, and fails closed when ancestry cannot be proven. A
+  complete displayed report and exit remain available; a marked partial record proves only visible
+  fields; and every invalid scan is reported as `tool error`/`unresolved`, never a pass.
+- AC-024 | REQ-024 | Given a fake Codex that emits one valid session and exits 7, when the runner
+  executes, then it invokes `exec` once, preserves Codex stderr/status, records evaluator status 0,
+  validates and hashes the unchanged inputs and response/events, returns 7, and refuses concurrent and
+  sequential reruns. Given malformed events or changed inputs, it still preserves Codex exit 7 and
+  stderr but records/returns evaluator exit 70 with separate diagnostics. An interrupt records 130.
 
 ## Product and Design
 
@@ -582,6 +625,17 @@ while linking to the full references for manual use.
   non-transferable; the next candidate requires a fresh multi-scenario focused proof and a fresh
   21/21 suite. Evidence: `tests/forward/invalid-evidence.md` and
   `tests/forward/raw-invalid/f0b31e2/`.
+- AUDIT-HIST-019 | failed | A clean focused F03/F05/F07 proof rejected candidate
+  `a87dba58cb98e2d513157af2be83acd0865db700` at 5/9. F03 run 3 treated a scan of its live run
+  directory as a pass; F05 run 2 said no scripts ran after executing preflight; F07 run 1 claimed
+  named files absent without a path inspection; and F03/F05/F07 responses used the overbroad
+  `automated failure` label for narrative facts. The original evaluator applied that label
+  asymmetrically—some otherwise matching responses passed—so raw scores remain frozen and the label
+  becomes a next-candidate hardening signal rather than a retroactive rescore. F07 run 3 independently
+  violates GF-1 through its live-directory automated pass. A separate preparatory set accidentally
+  included ignored `__pycache__` files and was excluded before scoring rather than used as replacement
+  evidence. Cross-platform CI and all passing responses are non-transferable. Evidence:
+  `tests/forward/invalid-evidence.md` and `tests/forward/raw-invalid/a87dba5-focal/`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -636,7 +690,19 @@ while linking to the full references for manual use.
   three raw isolated runs per nondeterministic scenario.
 - TEST-022 | planned | Forward-test F03, F05, and F07 three times each and reconcile every command,
   diagnostic, exit-code, and file-presence claim against the completed event stream before running a
-  fresh full suite; retain decisive failed records and require no unsupported workspace fact.
+  fresh full suite; retain decisive failed records and require no unsupported workspace fact. Include
+  exact absent entry, broken symlink, directory, non-regular file, access denial, case mismatch, and
+  excluded-glob cases so only specifically established nonexistence may be called absent.
+- TEST-023 | planned | In fresh sessions with active outputs inside the run directory, verify that
+  preflight uses only a stable file or separate isolated candidate (or is deferred), that relative,
+  absolute, parent, alias, and symlink spellings cannot reach the output-tainted directory, and that
+  complete displayed report/exit evidence remains available while partial output and unresolved
+  ancestry fail closed. Any invalid scan must appear as `tool error`/`unresolved`, never a pass.
+- TEST-024 | passed | `test_forward_runner_executes_once_and_preserves_status_precedence` and
+  `test_forward_runner_records_interrupt_as_evaluator_failure` execute the real runner and prove one
+  invocation, atomic concurrent and sequential overwrite refusal, unchanged-input and exact
+  response/event validation, distinct stderr/status capture, Codex-versus-evaluator exit precedence,
+  and interrupt status 130.
 
 | Requirement | Acceptance | Verification | Status |
 | --- | --- | --- | --- |
@@ -662,6 +728,8 @@ while linking to the full references for manual use.
 | REQ-020 | AC-020 | TEST-020 | planned |
 | REQ-021 | AC-021 | TEST-021 | planned |
 | REQ-022 | AC-022 | TEST-022 | planned |
+| REQ-023 | AC-023 | TEST-023 | planned |
+| REQ-024 | AC-024 | TEST-024 | passed |
 
 ## Decisions
 
@@ -767,6 +835,18 @@ while linking to the full references for manual use.
   claim in prose, tables, ledgers, and action summaries must therefore bind to an adequately scoped
   completed record, while user-provided and artifact-reported statements keep their source labels. |
   affects: REQ-012, REQ-021, REQ-022
+- DEC-023 | Make routine scanner use optional, target-first, and context-light. | rationale: candidate
+  `a87dba5` repeatedly loaded the 10,000-line implementation and then scanned its live output
+  directory despite the earlier protocol. Routine use needs only reviewed package identity and help;
+  source loading belongs to install/change/audit work. A canonical ancestry check must reject every
+  spelling of a directory containing session outputs and fail closed when paths or the output inventory
+  are unresolved. An invalid scan is an unresolved tool error, not a pass; a safe stable file, separate
+  candidate, or deferral preserves honest coverage. | affects: REQ-010, REQ-021, REQ-023
+- DEC-024 | Replace composable shell snippets with one capture runner. | rationale: a pipeline wrapper
+  lost component status, and a later multi-block shell protocol could exit before assembly or lose
+  diagnostic provenance. A standard-library runner can invoke one session without a shell, refuse
+  overwrite/rerun, preserve Codex and evaluator evidence independently, validate event/response
+  identity, and behavior-test status precedence across platforms. | affects: REQ-021, REQ-024
 
 ## Open Questions
 

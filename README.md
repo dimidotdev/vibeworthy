@@ -33,7 +33,11 @@ VibeWorthy requires a pre-response reconciliation for every tool-derived or work
 not only scanner results. A statement that a command ran, failed, emitted output, or returned an exit
 code must match that exact completed command record. Presence, absence, counts, contents, and “only
 this file exists” claims require an adequately scoped completed inspection that could have observed
-the exact item.
+the exact item. Aggregate scan counts and a clean finding summary do not establish that a named path
+is present or absent. Claiming a directory entry does not exist requires a non-following metadata
+lookup (`lstat`/`lexists` or equivalent) or exact parent-entry enumeration that specifically establishes
+nonexistence. A failed read, `test -f`, or glob may instead mean broken symlink, wrong type, access
+denial, case mismatch, or exclusion; report that exact state or `unverified`, not `absent`.
 
 A compound, failed, interrupted, or partial tool call proves only the facts its record explicitly
 captured. Silence, expected behavior, an artifact narrative, user-provided text, or a different
@@ -41,6 +45,12 @@ invocation is not execution evidence. If a fact was not established, report it a
 `unverified`, keep user-provided and artifact-reported facts labeled, and reconcile prose, tables,
 release ledgers, and action summaries before responding. A claim about current state also needs an
 inspection after the last relevant recorded mutation, or an explicit observation-time qualifier.
+Completed-command output remains available evidence even if it was not separately saved. A record
+marked truncated, interrupted, or partial proves only its visible fields; missing report fields,
+coverage, or exit remain unavailable and the result remains unresolved. Narrative facts remain
+`user-provided` or `artifact-reported`, never automated evidence. Negative action claims must also be
+exact: running a local preflight makes “no scripts executed” false even when no install, lifecycle, or
+remote script ran.
 
 ## Review before installing
 
@@ -149,6 +159,11 @@ those files and run the scanner locally as separate steps.
 The scanner uses Python 3.11 or newer and only the standard library. It reads the selected worktree,
 redacts matched values, and emits text, JSON, or SARIF:
 
+For routine use of an already reviewed package, inspect `--help` and the selected target rather than
+loading the scanner's full implementation into task context. Inspect source when installing,
+changing, or auditing the scanner. Run it only when a safe bounded target exists; a deferred scan is
+more accurate than scanning a live session directory merely to complete a checklist.
+
 ```bash
 python3 -I skill/vibeworthy/scripts/preflight.py /path/to/project
 python3 -I skill/vibeworthy/scripts/preflight.py /path/to/project --format json
@@ -185,24 +200,33 @@ swaps and restores paths entirely between checks. Stop editors, generators, buil
 before scanning. For release evidence, use a quiescent isolated checkout on a trusted runner and
 discard the result if anything else could have modified that checkout during the scan.
 
-An agent session directory is not quiescent while its event stream, transcript, response, or other
-output is still being written. Do not scan that directory as a whole. Use a stable bounded artifact
-or an isolated candidate copy, or defer the scan. Reconcile every claim about a tool call with its
-completed command record and the general evidence-integrity protocol above. For each scanner or
-verification used as evidence, preserve the observed report or result and exit code, including tool
-errors, and keep a later narrow pass separate from an earlier broader failure or invalid result.
+An agent session directory is not quiescent for the whole session when it contains or will contain an
+event stream, transcript, response, log, or build output, even while a writer appears idle. Do not scan
+that directory or any parent containing those outputs, whether named with `.`, an absolute path,
+alias, or symlink. Unless the host explicitly supplies a complete output-path inventory elsewhere,
+treat the physical current working directory as an output location. Canonicalize existing directory
+targets and known output paths before comparing ancestry; if resolution or inventory is incomplete,
+do not directory-scan. Use a stable bounded input file or a physically separate output-free candidate,
+or defer. Reconcile every claim with its completed command record and the general evidence-integrity
+protocol above. Preserve the observed report/result and exit for each verification, including errors,
+and keep a later narrow pass separate from an earlier broader failure or invalid result.
 
 Whenever a scan is executed or attempted—even if it will not be cited—never target any directory
-with an active writer and do not rely on default `.` inside a live agent session. Choose an explicit
-stable file or isolated candidate path first. Run the scanner as the only substantive command in
+with an active writer or current-session output path. Do not rely on default `.` or spell the same
+live directory as an absolute path. Choose an explicit stable file or isolated candidate path first;
+if none exists, defer rather than scanning to fill a checklist. Run the scanner as the only substantive command in
 that tool call—not as one segment of a `cat`/`find`/`sed` command list, pipe, substitution, or
 redirected command. After each attempt, preserve whichever of the rendered report and process exit
 code is present, and mark each missing component individually as `report: unavailable` or `exit
-code: unavailable`. If either is unavailable, record `result: unresolved`; do not reconstruct a pass
-from hashes, metadata, another invocation, or expectation. When the report is unavailable, also
-record `coverage: unavailable`; a requested target alone does not establish what was scanned.
+code: unavailable`. Complete output shown by the completed command is available even without a
+separately saved report. If it is marked truncated, interrupted, or partial, rely only on visible
+fields and keep missing report fields, coverage, or exit unavailable. If either component is
+unavailable, record `result: unresolved`; do not reconstruct a pass from hashes, metadata, another
+invocation, or expectation. A requested target alone does not establish what was scanned.
 The final evidence must account for every scan attempt, including any invalid live-directory scan,
-even when a later narrow scan passes. `--help` and `--version` are metadata calls, not scan attempts.
+even when a later narrow scan passes. An invalid or ancestry-unverified directory scan is `tool
+error`/`unresolved`, never `automated pass`, regardless of exit `0` or a clean report. `--help` and
+`--version` are metadata calls, not scan attempts.
 
 When Git is available, the scanner disables repository fsmonitor execution and uses Git only to
 enumerate tracked plus untracked, non-ignored files. Without Git it falls back to an explicitly labeled
