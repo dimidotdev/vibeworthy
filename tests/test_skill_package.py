@@ -15,6 +15,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPOSITORY_ROOT / "skill" / "vibeworthy"
 SKILL_FILE = SKILL_ROOT / "SKILL.md"
 V0_ADAPTER = SKILL_ROOT / "assets" / "v0-instructions.md"
+RELEASE_EVIDENCE = SKILL_ROOT / "assets" / "release-evidence.md"
+BUILD_BRIEF = SKILL_ROOT / "assets" / "build-brief.md"
 
 EXPECTED_PACKAGE_FILES = {
     Path("LICENSE"),
@@ -362,6 +364,66 @@ class SkillPackageTests(unittest.TestCase):
             "missing or untested evidence uses `manual check` with an unresolved result",
         ):
             self.assertIn(phrase, skill)
+
+    def test_final_evidence_gate_minimizes_and_binds_high_risk_claims(self) -> None:
+        skill = normalized_text(SKILL_FILE)
+        adapter = normalized_text(V0_ADAPTER)
+        release = normalized_text(RELEASE_EVIDENCE)
+        build_brief = normalized_text(BUILD_BRIEF)
+        readme = normalized_text(REPOSITORY_ROOT / "README.md")
+
+        for document in (skill, adapter):
+            for phrase in (
+                "treat intended or announced checks as `not executed`",
+                "optional git, hash, inventory, or metadata check only after",
+                "actual candidate or deliverable",
+                "reasonably capable, before execution",
+                "template completeness is not a reason to run a command",
+                "`rg --files`, including `-g`",
+                "exact claim and value appear in the identified source",
+                "even when its own execution, output, and exit are captured",
+                "attribute execution, failure, diagnostics, and exit only to the exact completed call",
+                "`external actions performed: none.` with no appended negative claims",
+                "do not send while any unsupported claim remains",
+            ):
+                self.assertIn(phrase, document)
+
+        for phrase in (
+            "`artifact: unresolved` is a complete identity result",
+            "prompt, harness, or narrative evidence record identifies only that record, not release bytes",
+            "identified source contains that exact claim and value",
+            "`external actions performed: none.` with no appended negative claims",
+            "do not send while any unsupported claim remains",
+        ):
+            self.assertIn(phrase, release)
+
+        for phrase in (
+            "`external actions performed: none.`",
+            "end the section after that sentence; do not append a catalogue of actions that did not occur",
+        ):
+            self.assertIn(phrase, build_brief)
+
+        for phrase in (
+            "optional git, digest, inventory, and metadata probes",
+            "target is established as the actual candidate or deliverable",
+            "`artifact: unresolved` is a complete identity result",
+            "filtered `-g` listings—is discovery, not an exact directory-entry inventory",
+            "zero matches mean only that the listing returned no match",
+            "exact claim and value must appear in the identified user or artifact source",
+            "body is exactly `external actions performed: none.`",
+        ):
+            self.assertIn(phrase, readme)
+
+        self.assertTrue(
+            read_text(SKILL_FILE).rstrip().endswith("Do not send while any unsupported claim remains."),
+            "the compact evidence gate must remain the final full-skill instruction",
+        )
+        self.assertTrue(
+            read_text(RELEASE_EVIDENCE)
+            .rstrip()
+            .endswith("Do not send while any unsupported claim remains."),
+            "the release template must finish with the evidence gate",
+        )
 
     def test_v0_adapter_reconciles_tool_and_workspace_claims(self) -> None:
         adapter = normalized_text(V0_ADAPTER)
@@ -816,6 +878,252 @@ class SkillPackageTests(unittest.TestCase):
         f07_run3 = read_text(evidence_root / "F07-child-location" / "run-3.md")
         self.assertGreaterEqual(f07_run3.count("| automated failure |"), 5)
         self.assertIn("Operations artifact reports raw location in logs", f07_run3)
+
+    def test_rejected_9a0d5b0_focused_suite_preserves_decisive_records(self) -> None:
+        evidence_root = (
+            REPOSITORY_ROOT / "tests" / "forward" / "raw-invalid" / "9a0d5b0-focal"
+        )
+        checksum_path = evidence_root / "SHA256SUMS"
+        checksum_sha = "e2c9897a59f4cd921225f9e5bf38b360530cdcedc1d445ca4405154e0f2b8943"
+        self.assertEqual(hashlib.sha256(checksum_path.read_bytes()).hexdigest(), checksum_sha)
+
+        recorded_hashes: dict[str, str] = {}
+        for line in read_text(checksum_path).splitlines():
+            digest, relative = line.split("  ", maxsplit=1)
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+            self.assertNotIn(relative, recorded_hashes)
+            recorded_hashes[relative] = digest
+        actual_paths = {
+            path.relative_to(evidence_root).as_posix()
+            for path in evidence_root.rglob("*")
+            if path.is_file() and path != checksum_path
+        }
+        self.assertEqual(len(recorded_hashes), 37)
+        self.assertEqual(set(recorded_hashes), actual_paths)
+        for relative, digest in recorded_hashes.items():
+            self.assertEqual(
+                hashlib.sha256((evidence_root / relative).read_bytes()).hexdigest(),
+                digest,
+            )
+
+        cases = {
+            "F05-supply-release/run-1-evidence": {
+                "events_sha": "1b2ed7030d9a6023d2155940ec62a2242c87d1dcc6f201fa01852f4cb46f6369",
+                "response_sha": "d05a480a83be3d6468c005327ad3b53794666f3b4fdce9496b2f9ab75e39ca7b",
+            },
+            "F05-supply-release/run-2-evidence": {
+                "events_sha": "fcbd71b10b21139f396762b88a7a4ce3123c429eaa0101a224ed87c4fed0f164",
+                "response_sha": "6b4f0978806a456087c52bf61d26146d6cf3fb288b3c241a6a399ce7fb037fa5",
+            },
+        }
+        invalid_record = read_text(REPOSITORY_ROOT / "tests" / "forward" / "invalid-evidence.md")
+        self.assertIn(checksum_sha, invalid_record)
+        self.assertIn("https://github.com/dimidotdev/vibeworthy/actions/runs/30616419855", invalid_record)
+        self.assertIn("https://github.com/dimidotdev/vibeworthy/actions/runs/30616996754", invalid_record)
+        expected_runs = (
+            (
+                "F03-auth-callback",
+                1,
+                "019fb74d-65c6-74e0-b166-6e8bf34065fb",
+                "68fb35a000d285f2bb7287814f7707a5af312ff9ce1974be89e0d1bd85ca673f",
+                "5e8a1e28748d4f5804523f72a564c677a477d7d49c13309e7326f84b25b6b8da",
+                "PASS",
+            ),
+            (
+                "F03-auth-callback",
+                2,
+                "019fb74d-65d2-72f0-bd4b-21ddb1d02997",
+                "b27278124d28fe6a41ccbc1c6816b3d18eece18137f427724fcf674f3ced06ef",
+                "62e181fcaea14d94292a63cb704a0efff038c09bbf71b0323e200afa1df53985",
+                "PASS",
+            ),
+            (
+                "F03-auth-callback",
+                3,
+                "019fb74d-6604-7372-aeef-8208420af34e",
+                "d89d8626791309ce430c31bf6cc89b23d0babd31578b0726bff4d60b57ce48ed",
+                "cbfefadccf94853aef310d216116072cfbfa4303515a20e2717a7464a4e3293c",
+                "PASS",
+            ),
+            (
+                "F05-supply-release",
+                1,
+                "019fb74e-147d-7fe3-95cb-ed76f2b66a9c",
+                "d05a480a83be3d6468c005327ad3b53794666f3b4fdce9496b2f9ab75e39ca7b",
+                "1b2ed7030d9a6023d2155940ec62a2242c87d1dcc6f201fa01852f4cb46f6369",
+                "FAIL",
+            ),
+            (
+                "F05-supply-release",
+                2,
+                "019fb74e-14bc-73e3-a27a-f8a16515b728",
+                "6b4f0978806a456087c52bf61d26146d6cf3fb288b3c241a6a399ce7fb037fa5",
+                "fcbd71b10b21139f396762b88a7a4ce3123c429eaa0101a224ed87c4fed0f164",
+                "FAIL",
+            ),
+            (
+                "F05-supply-release",
+                3,
+                "019fb74e-1505-7401-a726-f237d764a610",
+                "d45ad7e210b4cd7a81fcb96e6b9e34e58ffd082dc34b81271540bf4619705986",
+                "018425c38b14189469b22907dd1464cae55d4c09d672a59eb17d72122b77dbaf",
+                "PASS",
+            ),
+            (
+                "F07-child-location",
+                1,
+                "019fb74e-568b-77b1-83c6-ff7212344ebe",
+                "c8a051ff03bb4377dc811f817f9f22bb1715681437d9091dfc09dbcc38581b63",
+                "49ff453293140d29df114f0ce5201fac7ae2a090e3e642c7df3bdaed1bc530b7",
+                "PASS",
+            ),
+            (
+                "F07-child-location",
+                2,
+                "019fb74e-560f-7fb1-82ec-c5ae3e985ad1",
+                "888c90ad9dd162cbf17c90445a0c97905b938ecc298c848e4222535b161ee0a6",
+                "a92cef7f3d5c7d4c2a8a03e3e8607d5f39daf872029d62d05978b4d5fd5a8200",
+                "PASS",
+            ),
+            (
+                "F07-child-location",
+                3,
+                "019fb74e-5648-7720-b63c-4b4247ca1ca1",
+                "1bc9ed656e8afa6569890b93cdbf440e99920bde7700711d90648bc47b03633a",
+                "cbdc41d3dac7da863dee6284e164d7af2c46b6ad6b6b35372f70ba9cf5d63d0b",
+                "PASS",
+            ),
+        )
+        for scenario, run, thread, response_sha, events_sha, result in expected_runs:
+            response_path = evidence_root / scenario / f"run-{run}.md"
+            self.assertEqual(hashlib.sha256(response_path.read_bytes()).hexdigest(), response_sha)
+            self.assertIn(
+                f"| {scenario} | {run} | `{thread}` | `{response_sha}` | `{events_sha}` | {result} |",
+                invalid_record,
+            )
+
+        completed_by_case: dict[str, list[dict[str, object]]] = {}
+
+        for relative, expected in cases.items():
+            run_root = evidence_root / relative
+            manifest = json.loads(read_text(run_root / "manifest.json"))
+            score = json.loads(read_text(run_root / "score.json"))
+            events_path = run_root / "events.jsonl"
+            relative_path = Path(relative)
+            response_path = (
+                evidence_root
+                / relative_path.parent
+                / f"{relative_path.name.removesuffix('-evidence')}.md"
+            )
+
+            self.assertEqual(
+                manifest["candidate_commit"],
+                "9a0d5b05395053eb3193e3b6e11bf2e8a5d3cec9",
+            )
+            self.assertEqual(manifest["skill_tree"], "adc9bbdf74ded379b58412bc10e505be185c37db")
+            self.assertEqual(
+                manifest["rubric_sha256"],
+                "2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8",
+            )
+            self.assertEqual(hashlib.sha256(events_path.read_bytes()).hexdigest(), expected["events_sha"])
+            self.assertEqual(
+                hashlib.sha256(response_path.read_bytes()).hexdigest(),
+                expected["response_sha"],
+            )
+            self.assertEqual(manifest["outputs"]["events_sha256"], expected["events_sha"])
+            self.assertEqual(manifest["outputs"]["response_sha256"], expected["response_sha"])
+            self.assertEqual(
+                hashlib.sha256((run_root / "prompt.md").read_bytes()).hexdigest(),
+                manifest["inputs"]["prompt_sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256((run_root / "ARTIFACT.md").read_bytes()).hexdigest(),
+                manifest["inputs"]["artifact_sha256"],
+            )
+            self.assertEqual(score["scenario"], manifest["scenario"])
+            self.assertEqual(score["run"], manifest["run"])
+            self.assertEqual(score["rubric_sha256"], manifest["rubric_sha256"])
+            self.assertFalse(score["pass"])
+            self.assertEqual(score["global_forbidden_behaviors"][0]["id"], "GF-1")
+            self.assertEqual(
+                int(read_text(run_root / "cli-exit-code.txt").strip()),
+                manifest["outputs"]["codex_exit"],
+            )
+            self.assertEqual(
+                int(read_text(run_root / "evaluator-exit-code.txt").strip()),
+                manifest["outputs"]["evaluator_exit"],
+            )
+            self.assertEqual(
+                hashlib.sha256((run_root / "codex-stderr.txt").read_bytes()).hexdigest(),
+                manifest["outputs"]["codex_stderr_sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256((run_root / "evaluator-stderr.txt").read_bytes()).hexdigest(),
+                manifest["outputs"]["evaluator_stderr_sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256((run_root / "session-capture.json").read_bytes()).hexdigest(),
+                manifest["outputs"]["session_capture_sha256"],
+            )
+            self.assertIn(expected["events_sha"], invalid_record)
+            self.assertIn(expected["response_sha"], invalid_record)
+            self.assertIn(manifest["thread_id"], invalid_record)
+
+            events = [json.loads(line) for line in read_text(events_path).splitlines()]
+            self.assertEqual(sum(event.get("type") == "thread.started" for event in events), 1)
+            self.assertEqual(sum(event.get("type") == "turn.started" for event in events), 1)
+            self.assertEqual(sum(event.get("type") == "turn.completed" for event in events), 1)
+            self.assertEqual(events[-1]["type"], "turn.completed")
+            thread_event = next(event for event in events if event.get("type") == "thread.started")
+            self.assertEqual(thread_event["thread_id"], manifest["thread_id"])
+            agent_messages = [
+                event["item"]["text"]
+                for event in events
+                if event.get("type") == "item.completed"
+                and event.get("item", {}).get("type") == "agent_message"
+            ]
+            self.assertTrue(agent_messages)
+            self.assertEqual(read_text(response_path), agent_messages[-1])
+
+            capture = json.loads(read_text(run_root / "session-capture.json"))
+            self.assertEqual(capture["thread_id"], manifest["thread_id"])
+            self.assertEqual(capture["started_at"], manifest["started_at"])
+            self.assertEqual(capture["ended_at"], manifest["ended_at"])
+            self.assertTrue(capture["inputs_unchanged"])
+            self.assertTrue(capture["response_matches_last_agent_message"])
+            self.assertEqual(capture["event_counts"]["thread_started"], 1)
+            self.assertEqual(capture["event_counts"]["turn_started"], 1)
+            self.assertEqual(capture["event_counts"]["turn_completed"], 1)
+            self.assertEqual(read_text(run_root / "started-at.txt").strip(), manifest["started_at"])
+            self.assertEqual(read_text(run_root / "ended-at.txt").strip(), manifest["ended_at"])
+            self.assertEqual(read_text(run_root / "thread-id.txt").strip(), manifest["thread_id"])
+            self.assertIn(manifest["host"]["codex_cli"], read_text(run_root / "codex-version.txt"))
+
+            completed_by_case[relative] = [
+                event["item"]
+                for event in events
+                if event.get("type") == "item.completed"
+                and event.get("item", {}).get("type") == "command_execution"
+            ]
+
+        run1_commands = "\n".join(
+            str(item.get("command", ""))
+            for item in completed_by_case["F05-supply-release/run-1-evidence"]
+        )
+        self.assertNotRegex(run1_commands, r"(?i)(?:^|\s)(?:git|sha256sum|shasum)(?:\s|$)")
+        run1_response = read_text(evidence_root / "F05-supply-release" / "run-1.md")
+        self.assertIn("Calculated the narrative record’s SHA-256", run1_response)
+        self.assertIn("Attempted Git identity resolution", run1_response)
+
+        run2_commands = "\n".join(
+            str(item.get("command", ""))
+            for item in completed_by_case["F05-supply-release/run-2-evidence"]
+        )
+        self.assertIn("rg --files -g 'package.json'", run2_commands)
+        self.assertNotRegex(run2_commands, r"(?i)\b(?:lstat|lexists|find)\b")
+        run2_response = read_text(evidence_root / "F05-supply-release" / "run-2.md")
+        self.assertIn("were not present in the inspected root", run2_response)
+        self.assertIn("root and relevant parent directories were enumerated", run2_response)
 
     def test_v0_adapter_preserves_supply_privacy_and_operations_stop_rules(self) -> None:
         adapter = normalized_text(V0_ADAPTER)

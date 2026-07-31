@@ -110,6 +110,15 @@ Before public release, manually review dependency identity and necessity, instal
 
 ## Reconcile evidence before responding
 
+Treat intended or announced checks as `not executed`. Present a digest, Git/ref, command, diagnostic,
+or exit status as observed only when that exact value appears in an adequately scoped completed
+record. Use a user/artifact source label only when that exact claim and value appear in the identified
+source; otherwise write `unverified`. Run an optional Git, hash, inventory, or metadata check only
+after its target is established as the actual candidate or deliverable and the check is reasonably
+capable, before execution, of resolving the gate or binding those bytes. Template completeness is not
+a reason to run a command; unresolved identity is complete, and a prompt, harness, or narrative-record
+digest does not identify release bytes.
+
 Inventory every claim that this session executed or observed: commands and tools; stdout, stderr,
 diagnostics, results, and exit codes; file or repository presence, absence, counts, and contents;
 versions; and test, build, or scan outcomes. Match each claim to an adequately scoped completed
@@ -120,7 +129,9 @@ Claim that a directory entry does not exist only after a non-following metadata 
 `lstat`/`lexists` or a platform equivalent, or an exact parent-entry enumeration, specifically reports
 nonexistence. A failed content read, `test -f`, or glob may instead mean a broken symlink, directory,
 non-regular file, access denial, case mismatch, or exclusion. Report that exact state or `unverified`,
-not `absent`.
+not `absent`. `rg --files`, including `-g`, and filtered regular-file listings are discovery only,
+not exact parent-entry enumeration. Zero matches mean `not returned`, never `absent`, `only`, or
+`root/parent enumerated`.
 For current-state claims, that inspection must follow the last relevant recorded mutation; otherwise
 qualify when the state was observed or mark it `unverified`.
 
@@ -179,6 +190,21 @@ Return exactly one recommendation when release is in scope:
 Lead with blockers, then show passes. State what was observed, executed, manually confirmed, and not checked. Remind the user that this reduced instruction, manual references, scanner output, and gate completion provide no security, compliance, profitability, or production-readiness guarantee.
 
 End by stating exactly which external or consequential actions were performed. If none, write
-`External actions performed: none`.
+exactly `External actions performed: none.` and stop. Do not append a catalogue of actions that did
+not occur; put relevant completed local checks in the verification section or ledger.
+
+## Final evidence gate
+
+Before sending, remove decision-irrelevant factual detail. For every remaining SHA/digest, Git/ref,
+presence/absence, enumeration, observed/inspected/calculated, command, failure, diagnostic, or exit
+claim, require the exact value in an adequately scoped completed record or a source label whose
+identified source contains that exact claim and value. Otherwise delete it or write `unverified`. Plans,
+commentary, silence, and intended checks prove neither execution nor results. A failed read,
+`test -f`, glob, `rg --files`, filtered listing, or aggregate scan summary—even when its own execution,
+output, and exit are captured—does not by itself prove nonexistence or exact enumeration. Attribute
+execution, failure, diagnostics, and exit only to the exact completed call.
+If no external or consequential action occurred, the `Actions` body must be exactly
+`External actions performed: none.` with no appended negative claims.
+Do not send while any unsupported claim remains.
 
 ---

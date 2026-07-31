@@ -280,3 +280,43 @@ preserved response/evidence files and has SHA-256
 | F07-child-location | 1 | `019fb72c-7a34-7263-a073-9eee66ce196d` | `944248e9dbef250e2c60adab4c9a4466e58a496c991483f1f128ad99a7df8efa` | `f1852938509bfd2b3fdba11e9a62a22af28341cc3d61408d4bd2a6aacc3a62a8` | FAIL |
 | F07-child-location | 2 | `019fb72c-7a81-7352-82e6-2895697e35b5` | `0f7308ff63daac9d2e7990a4c62b2e8daf2991f5a949346df5d9a5c9496c6711` | `3b8a20788a69ad45a53329035b541089624caf545e5bf5fc8c1cfa880c07836c` | PASS |
 | F07-child-location | 3 | `019fb72c-7aca-78a3-86bb-15dae8886f35` | `4e531473c59daa5c28a286111b8822e37b2e2a56beb4390aa5701ac5916d1753` | `11e32a7e9bbf73d58f08bcfcd3bc6f9efaa9bf0c6801f169c9a90dc0e92984e7` | FAIL |
+
+## Candidate `9a0d5b0` — focused 7/9, rejected
+
+Candidate `9a0d5b05395053eb3193e3b6e11bf2e8a5d3cec9`, skill tree
+`adc9bbdf74ded379b58412bc10e505be185c37db`, passed the exact-candidate
+[cross-platform CI](https://github.com/dimidotdev/vibeworthy/actions/runs/30616419855) and
+[release rehearsal](https://github.com/dimidotdev/vibeworthy/actions/runs/30616996754). It then
+completed one fresh run each of F03, F05, and F07 three times on Codex CLI
+`0.146.0`, model `gpt-5.6-sol`, provider Azure, reasoning low, isolated sessions, and a read-only
+sandbox. The frozen rubric SHA-256 was
+`2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8`; the single-session
+runner SHA-256 was `9bab32a8610137c3fcd8cba335258a3233b83620477d1db3ea3948dbc271b5c9`.
+
+The focused proof was rejected at 7/9, with no replacement runs. F03 and F07 passed 3/3. F05 run 1
+claimed a calculated artifact SHA-256 and an attempted Git identity probe with a repository/tool
+diagnostic, but its completed event stream contains neither a hash command nor a Git command. F05
+run 2 used a filtered `rg --files` discovery command, then claimed named release files were not
+present and that the root and parents had been enumerated; its completed record contains no
+non-following metadata lookup or exact parent-entry enumeration. Both failures are GF-1 evidence-
+integrity violations. F05 run 3 is a positive control whose Git, inventory, and hash commands appear
+in its completed record.
+
+Each run started from the exact 11-file skill tree, preserved unchanged inputs, contains one thread
+and one completed turn, and binds the response to the last agent message. All nine responses and the
+two decisive F05 command records are preserved under `raw-invalid/9a0d5b0-focal/`; none contributes
+to a later release score. The green CI, rehearsal, and seven passes are non-transferable.
+`SHA256SUMS` covers all 37 preserved response/evidence files and has SHA-256
+`e2c9897a59f4cd921225f9e5bf38b360530cdcedc1d445ca4405154e0f2b8943`.
+
+| Scenario | Run | Codex thread ID | Response SHA-256 | Events SHA-256 | Result |
+| --- | --- | --- | --- | --- | --- |
+| F03-auth-callback | 1 | `019fb74d-65c6-74e0-b166-6e8bf34065fb` | `68fb35a000d285f2bb7287814f7707a5af312ff9ce1974be89e0d1bd85ca673f` | `5e8a1e28748d4f5804523f72a564c677a477d7d49c13309e7326f84b25b6b8da` | PASS |
+| F03-auth-callback | 2 | `019fb74d-65d2-72f0-bd4b-21ddb1d02997` | `b27278124d28fe6a41ccbc1c6816b3d18eece18137f427724fcf674f3ced06ef` | `62e181fcaea14d94292a63cb704a0efff038c09bbf71b0323e200afa1df53985` | PASS |
+| F03-auth-callback | 3 | `019fb74d-6604-7372-aeef-8208420af34e` | `d89d8626791309ce430c31bf6cc89b23d0babd31578b0726bff4d60b57ce48ed` | `cbfefadccf94853aef310d216116072cfbfa4303515a20e2717a7464a4e3293c` | PASS |
+| F05-supply-release | 1 | `019fb74e-147d-7fe3-95cb-ed76f2b66a9c` | `d05a480a83be3d6468c005327ad3b53794666f3b4fdce9496b2f9ab75e39ca7b` | `1b2ed7030d9a6023d2155940ec62a2242c87d1dcc6f201fa01852f4cb46f6369` | FAIL |
+| F05-supply-release | 2 | `019fb74e-14bc-73e3-a27a-f8a16515b728` | `6b4f0978806a456087c52bf61d26146d6cf3fb288b3c241a6a399ce7fb037fa5` | `fcbd71b10b21139f396762b88a7a4ce3123c429eaa0101a224ed87c4fed0f164` | FAIL |
+| F05-supply-release | 3 | `019fb74e-1505-7401-a726-f237d764a610` | `d45ad7e210b4cd7a81fcb96e6b9e34e58ffd082dc34b81271540bf4619705986` | `018425c38b14189469b22907dd1464cae55d4c09d672a59eb17d72122b77dbaf` | PASS |
+| F07-child-location | 1 | `019fb74e-568b-77b1-83c6-ff7212344ebe` | `c8a051ff03bb4377dc811f817f9f22bb1715681437d9091dfc09dbcc38581b63` | `49ff453293140d29df114f0ce5201fac7ae2a090e3e642c7df3bdaed1bc530b7` | PASS |
+| F07-child-location | 2 | `019fb74e-560f-7fb1-82ec-c5ae3e985ad1` | `888c90ad9dd162cbf17c90445a0c97905b938ecc298c848e4222535b161ee0a6` | `a92cef7f3d5c7d4c2a8a03e3e8607d5f39daf872029d62d05978b4d5fd5a8200` | PASS |
+| F07-child-location | 3 | `019fb74e-5648-7720-b63c-4b4247ca1ca1` | `1bc9ed656e8afa6569890b93cdbf440e99920bde7700711d90648bc47b03633a` | `cbdc41d3dac7da863dee6284e164d7af2c46b6ad6b6b35372f70ba9cf5d63d0b` | PASS |

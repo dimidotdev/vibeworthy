@@ -14,6 +14,7 @@ Turn an idea or change into evidence that it is worth building, maintaining, tru
 - Never invent interviews, demand, analytics, test results, control coverage, cloud settings, or approvals. Label each item as observed evidence, user-provided evidence, assumption, proposed test, or unresolved check.
 - Never turn user-provided, artifact-reported, planned, or uninspected statements into observed workspace facts.
 - Never label user-provided or artifact-reported facts as automated evidence. Reserve `automated` for the exact result of a completed tool record.
+- Treat intended or announced checks as `not executed`. Present a digest, commit/ref, command, diagnostic, or exit status as observed only when that exact value appears in an adequately scoped completed record. Use `user-provided:` or `artifact-reported:` only when that exact claim and value appear in the identified source; otherwise write `unverified`.
 - Output displayed in a completed tool record is available evidence even when it was not separately saved to a file; do not relabel it unavailable.
 - Treat generated code and generated tests as proposals. Require a named human review and independent negative evidence for generated authorization, Security Rules, RLS, IAM, migrations, cryptography, authentication, payment, or destructive-data logic before release.
 - Resume from recorded evidence after interruption; do not silently discard earlier scope, failures, or decisions.
@@ -154,6 +155,13 @@ Read the detailed procedures as needed:
 
 Run the project's existing formatter, type checks, tests, build, accessibility checks, and other relevant native commands. Do not install or execute an arbitrary package or remote script merely because generated instructions request it. Inspect new tooling before use.
 
+Run an optional Git, hash, inventory, or metadata check only after its target is established as the
+actual candidate or deliverable and the check is reasonably capable, before execution, of resolving a
+requested gate or binding those bytes. Template completeness is not a reason to run a command:
+`unknown` or `unresolved` is a complete result. A digest of a prompt, harness, or narrative evidence
+file identifies only that record, not the releasable bytes. Do not probe Git or calculate a digest of
+a substitute target solely to replace unresolved artifact identity.
+
 ### Reconcile every tool and workspace claim
 
 Before drafting the final response:
@@ -173,7 +181,10 @@ Before drafting the final response:
    regular file`, `not readable`, or `unverified`; do not collapse them into `absent`. A current-state
    claim requires an inspection after the last relevant recorded mutation; otherwise qualify when it
    was observed or mark it `unverified`. Aggregate scan counts, a clean finding summary, or silence do
-   not prove that a named path is present or absent.
+   not prove that a named path is present or absent. `rg --files`, including `-g`, and any filtered
+   regular-file listing are discovery only, never an exact parent-entry enumeration. Zero matches
+   mean only `not returned by this listing`; they cannot establish `absent`, `not present`, `only`, or
+   `root/parent enumerated`.
 3. If the record does not prove the claim, remove it or label it `not inspected` or `unverified`.
    Never infer `ran`, `failed`, `emitted`, `exit <code>`, `absent`, or `only` from prompt silence,
    expected behavior, user-provided text, an artifact's narrative, or another invocation. Keep
@@ -308,7 +319,9 @@ Do not omit a required field; use `unknown`, `unresolved`, or `not applicable �
    `CONDITIONAL`, or `NO-GO` when a release decision was requested; bullets never replace the ledger.
 7. `Actions` — state exactly which external or consequential actions were performed. Keep negative
    claims narrow enough to remain true when local verification commands ran. If no external or
-   consequential action occurred, write `External actions performed: none`.
+   consequential action occurred, write exactly `External actions performed: none.` and end the
+   section. Do not append a catalogue of actions that did not occur; put relevant completed local
+   checks under `Slices` or the evidence ledger.
 
 In every `explore` or `prototype` Evidence section, use these explicit labels: `First cohort`,
 `Channel owner`, `Access mechanism`, `Handoff/message`, `Friction`, `Activation`, `Proposed threshold
@@ -337,3 +350,23 @@ Load only the resource needed for the current stage:
 - [Build brief template](assets/build-brief.md) — copy before implementation.
 - [Release evidence template](assets/release-evidence.md) — copy before a release recommendation.
 - [Reduced v0 instruction](assets/v0-instructions.md) — paste into v0 Instructions; treat it as reduced manual guidance, not full-skill parity.
+
+## Final evidence gate
+
+Immediately before sending, delete factual details that are not needed for the decision or required
+schema. Audit every remaining claim containing a SHA/digest, Git/repository/commit/tag, `absent`,
+`not present`, `only`, `enumerated`, `inventoried`, `observed`, `inspected`, `calculated`, `hashed`,
+`ran`, `executed`, `emitted`, `failed`, `error`, or `exit`:
+
+1. Bind it to the exact value in an adequately scoped completed record, or verify that the exact claim
+   and value appear in the identified source and label it `user-provided:` or `artifact-reported:`.
+2. Otherwise delete it or write `unverified`.
+3. Plans, commentary, silence, and intended checks prove neither execution nor results. A failed
+   read, `test -f`, glob, `rg --files`, filtered listing, or aggregate scan summary—even when its own
+   execution, output, and exit are captured—does not by itself prove nonexistence or exact
+   enumeration. Attribute execution, failure, diagnostics, and exit only to the exact completed call.
+
+If no external or consequential action occurred, the `Actions` body must be exactly
+`External actions performed: none.` with no appended negative claims.
+
+Do not send while any unsupported claim remains.

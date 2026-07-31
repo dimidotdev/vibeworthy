@@ -4,6 +4,13 @@ Copy this file for one release candidate. Record facts for the named artifact an
 
 ## Release identity
 
+The C/T/R/A/D fields below apply to a release of the VibeWorthy repository itself. For another
+project, replace them with that project's native artifact identity. `Artifact: unresolved` is a
+complete identity result and blocks `GO`; do not run Git or hash commands merely to fill this
+template. First establish that the target is the actual candidate or deliverable and that the check
+could resolve the gate or bind those bytes. A digest of this prompt, harness, or narrative evidence
+record identifies only that record, not release bytes.
+
 - Evaluated candidate commit (C): `[full 40-character commit SHA]`
 - Evaluated `skill/vibeworthy` tree (T): `[full Git tree SHA from C]`
 - Release/tag commit (R): `[full 40-character commit SHA]`
@@ -240,6 +247,22 @@ Apply exactly one rule:
 State exactly which external or consequential actions were performed. A future plan, checklist, or
 approval request is not an executed action. If none occurred, write:
 
-`External actions performed: none`
+`External actions performed: none.`
 
-Otherwise record the action, exact target and environment, named approval, result, and safe evidence.
+End the section after that sentence; do not append a catalogue of actions that did not occur. Put
+relevant completed local checks under `Slices` or the verification ledger. Otherwise record the
+action, exact target and environment, named approval, result, and safe evidence.
+
+## Final evidence gate
+
+Before sending, remove decision-irrelevant factual detail. For every remaining SHA/digest, Git/ref,
+presence/absence, enumeration, observed/inspected/calculated, command, failure, diagnostic, or exit
+claim, require the exact value in an adequately scoped completed record or a source label whose
+identified source contains that exact claim and value. Otherwise delete it or write `unverified`. Plans,
+commentary, silence, and intended checks prove neither execution nor results. A failed read,
+`test -f`, glob, `rg --files`, filtered listing, or aggregate scan summary—even when its own execution,
+output, and exit are captured—does not by itself prove nonexistence or exact enumeration. Attribute
+execution, failure, diagnostics, and exit only to the exact completed call.
+If no external or consequential action occurred, the `Actions` body must be exactly
+`External actions performed: none.` with no appended negative claims.
+Do not send while any unsupported claim remains.

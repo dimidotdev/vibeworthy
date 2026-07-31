@@ -144,7 +144,8 @@ Do not begin a consequential slice while a required authority decision is unreso
 State exactly what happened, not what a plan proposes. When nothing external or consequential was
 performed, write the literal sentence:
 
-`External actions performed: none`
+`External actions performed: none.`
 
-Otherwise record each action, exact target, environment, approval, result, and safe evidence without
-including credentials or personal data.
+End the section after that sentence; do not append a catalogue of actions that did not occur. Put
+relevant completed local checks under verification. Otherwise record each action, exact target,
+environment, approval, result, and safe evidence without including credentials or personal data.

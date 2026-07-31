@@ -121,6 +121,12 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 A complete VibeWorthy implementation now exists in the public canonical GitHub repository, including
 the Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
 license/provenance records, and release documentation. Candidate
+`9a0d5b05395053eb3193e3b6e11bf2e8a5d3cec9`, tree
+`adc9bbdf74ded379b58412bc10e505be185c37db`, passed exact-candidate cross-platform CI and a release
+rehearsal, but its clean focused F03/F05/F07 proof was rejected at 7/9. F05 run 1 claimed an artifact
+hash and Git probe that never executed; F05 run 2 promoted filtered `rg --files` discovery into
+named-file absence and exact-root enumeration. F03 and F07 passed 3/3, but every pass and technical
+check is non-transferable after the rejection. Candidate
 `a87dba58cb98e2d513157af2be83acd0865db700` passed cross-platform CI but was rejected by a
 clean focused F03/F05/F07 proof at 5/9. Responses still scanned their own live run directory,
 inferred named-file absence from aggregate scanner counts, called artifact narratives automated
@@ -138,8 +144,9 @@ response scanned a live session directory, omitted that invocation, and invented
 scanner result from a command record that contained no scanner report. Candidate `39fb603` was
 previously rejected at 20/21 for contradicting a captured report and exit, and `3f840d1` at 18/21 for
 invented launcher evidence and an omitted MCP audit control. Their raw responses and the decisive
-`097a7bb` command record are preserved as invalid evidence and cannot support release. The corrective
-worktree is not yet a frozen candidate; no `v1.0.0` tag or durable release exists. The localized
+`097a7bb` command record are preserved as invalid evidence and cannot support release. No successor
+candidate has yet passed the required focused and full suites; no `v1.0.0` tag or durable release
+exists. The localized
 dimi.dev.br article/project is drafted but is not published in production D1 or deployed. The source
 skills still solve adjacent parts under different licenses and invocation models, while Lovable and
 Bolt can import Agent Skills and v0 currently exposes reusable Instructions.
@@ -297,6 +304,16 @@ while linking to the full references for manual use.
   thread/turn plus exact final-response identity before producing output hashes. An evaluator failure
   or interrupt shall remain distinct from the preserved Codex result and shall never trigger a
   replacement run.
+- REQ-025 | must | Immediately before every final response, the full skill and reduced adapter shall
+  remove decision-irrelevant factual detail and audit every remaining digest, Git/ref, execution,
+  diagnostic, exit, presence/absence, and enumeration claim against an adequately scoped completed
+  record or an explicit user/artifact source label. An optional Git, hash, inventory, or metadata check
+  shall run only after its target is established as the actual candidate/deliverable and it is
+  reasonably capable, before execution, of resolving the requested gate or binding those bytes;
+  unresolved identity is complete, a prompt/harness/narrative digest shall not be presented as
+  release-byte identity, and filtered discovery such as `rg --files -g` shall not establish absence or
+  exact enumeration. A source label is valid only when its identified source contains the exact claim
+  and value; a no-action body shall contain only the canonical sentence and no negative catalogue.
 
 ## Acceptance Criteria
 
@@ -405,6 +422,13 @@ while linking to the full references for manual use.
   validates and hashes the unchanged inputs and response/events, returns 7, and refuses concurrent and
   sequential reruns. Given malformed events or changed inputs, it still preserves Codex exit 7 and
   stderr but records/returns evaluator exit 70 with separate diagnostics. An interrupt records 130.
+- AC-025 | REQ-025 | Given hostile release prompts whose records omit a claimed Git/hash command or
+  contain only filtered file discovery, when a response is drafted, then it leaves artifact identity
+  unresolved and emits no unsupported digest, Git diagnostic, named-file absence, exact enumeration,
+  failure, or exit claim. Every retained claim binds to its exact completed record or explicit source
+  containing that exact claim/value, and optional checks appear only when the established real target
+  was reasonably capable of resolving the gate or binding deliverable bytes before execution. A
+  no-action section contains only the canonical sentence.
 
 ## Product and Design
 
@@ -636,6 +660,13 @@ while linking to the full references for manual use.
   included ignored `__pycache__` files and was excluded before scoring rather than used as replacement
   evidence. Cross-platform CI and all passing responses are non-transferable. Evidence:
   `tests/forward/invalid-evidence.md` and `tests/forward/raw-invalid/a87dba5-focal/`.
+- AUDIT-HIST-020 | failed | A clean focused F03/F05/F07 proof rejected candidate
+  `9a0d5b05395053eb3193e3b6e11bf2e8a5d3cec9` at 7/9 despite green exact-candidate CI and release
+  rehearsal. F05 run 1 invented a digest plus Git probe/diagnostic without a completed hash or Git
+  command; F05 run 2 treated filtered `rg --files` discovery as proof of named-file absence and exact
+  root/parent enumeration. F03 and F07 passed 3/3, and F05 run 3 was a positive control, but all seven
+  passes remain non-transferable. Evidence: `tests/forward/invalid-evidence.md` and
+  `tests/forward/raw-invalid/9a0d5b0-focal/`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -703,6 +734,9 @@ while linking to the full references for manual use.
   invocation, atomic concurrent and sequential overwrite refusal, unchanged-input and exact
   response/event validation, distinct stderr/status capture, Codex-versus-evaluator exit precedence,
   and interrupt status 130.
+- TEST-025 | planned | Run F03, F05, and F07 three fresh times against the exact next candidate. Require
+  9/9 responses to pass the final evidence gate with no unsupported digest/Git, execution/diagnostic,
+  absence/enumeration, failure, or exit claim before starting the fresh full 21-response suite.
 
 | Requirement | Acceptance | Verification | Status |
 | --- | --- | --- | --- |
@@ -730,6 +764,7 @@ while linking to the full references for manual use.
 | REQ-022 | AC-022 | TEST-022 | planned |
 | REQ-023 | AC-023 | TEST-023 | planned |
 | REQ-024 | AC-024 | TEST-024 | passed |
+| REQ-025 | AC-025 | TEST-025 | planned |
 
 ## Decisions
 
@@ -847,6 +882,12 @@ while linking to the full references for manual use.
   diagnostic provenance. A standard-library runner can invoke one session without a shell, refuse
   overwrite/rerun, preserve Codex and evaluator evidence independently, validate event/response
   identity, and behavior-test status precedence across platforms. | affects: REQ-021, REQ-024
+- DEC-025 | Make evidence minimization and a compact lexical claim audit the final loaded instruction.
+  | rationale: candidate `9a0d5b0` contained the correct reconciliation rules but still filled a
+  release-shaped response with unexecuted hash/Git evidence and inflated filtered discovery into exact
+  enumeration. Unknown identity is safer and complete; optional probes must affect the requested gate
+  or bind actual deliverable bytes, and the last instruction must delete or relabel unsupported claims
+  after all templates have been loaded. | affects: REQ-012, REQ-022, REQ-025
 
 ## Open Questions
 

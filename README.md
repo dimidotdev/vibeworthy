@@ -52,6 +52,18 @@ coverage, or exit remain unavailable and the result remains unresolved. Narrativ
 exact: running a local preflight makes “no scripts executed” false even when no install, lifecycle, or
 remote script ran.
 
+Optional Git, digest, inventory, and metadata probes are justified only after the target is established
+as the actual candidate or deliverable and the check could resolve a requested gate or bind those
+bytes; a template is not a reason to manufacture extra evidence.
+`Artifact: unresolved` is a complete identity result, and the digest of a narrative evidence record
+does not identify release bytes. `rg --files`—including filtered `-g` listings—is discovery, not an
+exact directory-entry inventory: zero matches mean only that the listing returned no match, never
+that a named entry is absent or that the root was fully enumerated. The packaged instructions finish
+with a compact evidence gate that removes unsupported details immediately before the response.
+Source labels are not substitutes for evidence: the exact claim and value must appear in the
+identified user or artifact source. When no external or consequential action occurred, the Actions
+body is exactly `External actions performed: none.` with no appended catalogue of negative claims.
+
 ## Review before installing
 
 An Agent Skill can influence tool use and may include executable files. Read every file under
