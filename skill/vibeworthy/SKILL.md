@@ -158,16 +158,24 @@ mode—for example, `python3 -I scripts/preflight.py <project-root> --format tex
 mandatory: without it, Python startup or imports can execute project-controlled code before the
 scanner begins. Record only commands that were actually executed and only results and exit codes
 present in their captured output. Never infer that another launcher was unavailable, failed, or
-returned a particular exit code merely because a different launcher was selected. Treat scanner
-output as heuristic worktree evidence, not proof about Git history, submodules, dependencies, cloud
-configuration, or runtime behavior. Keep automated passes, failures, tool errors, and manual checks
-separate. Never convert a tool error or unperformed manual check into a pass.
+returned a particular exit code merely because a different launcher was selected. Reconcile every
+narrative claim and evidence-ledger entry about a tool call with its completed command record. For
+each scanner or verification used as evidence, preserve the observed report or result and exit code,
+including tool errors; never claim that output or an exit code was absent when the record contains
+it. Treat scanner output as heuristic worktree evidence, not proof about Git history, submodules,
+dependencies, cloud configuration, or runtime behavior. Keep automated passes, failures, tool
+errors, and manual checks separate. Never convert a tool error or unperformed manual check into a
+pass, and never let a later narrow pass overwrite an earlier broader failure or invalid result.
 
 Run the scanner only while the target is quiescent. It reads a non-atomic worktree view: it rejects
 redirects and fails closed on changes it observes, but it cannot defeat a local writer that swaps and
-restores paths entirely between checks. For release evidence, scan an isolated checkout on a trusted
-runner with no editor, generator, build, or other concurrent writer; otherwise record the scan as
-invalid rather than clean.
+restores paths entirely between checks. A directory whose contents are still being written by a
+running command—for example, a live event stream, transcript, response file, or build output—is not
+quiescent; do not scan that directory as a whole. Scan a stable bounded artifact or an isolated
+candidate copy, or defer the scan. Report narrower coverage explicitly rather than presenting it as
+equivalent to the workspace. For release evidence, scan an isolated checkout on a trusted runner
+with no editor, generator, build, or other concurrent writer; otherwise record the scan as invalid
+rather than clean.
 
 For public release, also require relevant authorization matrices, secret-history review, privacy review, dependency and known-exploited-vulnerability review, transitive SBOM, immutable automation pins, artifact provenance or signature, digest verification, backup/restore evidence, migration recovery, alert ownership, and containment. Record missing evidence as missing.
 

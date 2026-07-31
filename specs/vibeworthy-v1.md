@@ -121,14 +121,15 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 A complete VibeWorthy implementation now exists in the public canonical GitHub repository, including
 the Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
 license/provenance records, and release documentation. Candidate
-`3f840d1f750d569c8f60567e16bca5d4a841ce98` passed cross-platform CI, exact-SHA technical review,
-and the release rehearsal, but was rejected at 18/21 by the frozen forward suite because three
-responses invented launcher evidence and one also omitted a required MCP audit control. Those raw
-responses are preserved as invalid evidence and cannot support release. The corrective worktree is
-not yet a frozen candidate; no `v1.0.0` tag or durable release exists. The localized dimi.dev.br
-article/project is drafted but is not published in production D1 or deployed. The source skills
-still solve adjacent parts under different licenses and invocation models, while Lovable and Bolt
-can import Agent Skills and v0 currently exposes reusable Instructions.
+`39fb6039036cc673c05d7cf3e71408c00b57de27` passed cross-platform CI, exact-SHA technical review,
+and the release rehearsal, but was rejected at 20/21 by the frozen forward suite because one response
+contradicted a captured scanner report and exit code. Its predecessor `3f840d1` was rejected at 18/21
+for invented launcher evidence and an omitted MCP audit control. Both raw suites are preserved as
+invalid evidence and cannot support release. The corrective worktree is not yet a frozen candidate;
+no `v1.0.0` tag or durable release exists. The localized dimi.dev.br article/project is drafted but
+is not published in production D1 or deployed. The source skills still solve adjacent parts under
+different licenses and invocation models, while Lovable and Bolt can import Agent Skills and v0
+currently exposes reusable Instructions.
 
 ## Proposed Behavior
 
@@ -538,6 +539,12 @@ while linking to the full references for manual use.
   SBOM/checksum inventory, workflow hardening, and external release controls in isolated simulation.
   No real OIDC rehearsal, tag, attestation, public import, or durable release was performed. This
   historical pass is non-transferable. Evidence: `docs/audits/2026-07-30-candidate-c44f1d4.md`.
+- AUDIT-HIST-016 | failed | The frozen 21-response suite rejected candidate
+  `39fb6039036cc673c05d7cf3e71408c00b57de27` at 20/21. F05 run 1 claimed that a workspace scanner
+  produced no report or exit code although its completed event record contained a structured
+  `tool.file-race` report and exit `2`. A later narrow pass did not erase that contradiction. The
+  other 20 passes are non-transferable; the next exact candidate requires a fresh 21/21 suite.
+  Evidence: `tests/forward/invalid-evidence.md` and `tests/forward/raw-invalid/39fb603/`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -700,6 +707,12 @@ while linking to the full references for manual use.
   a deliberately small heuristic preflight; unsupported expressions remain unresolved and the
   independent authorization/migration review gate still blocks release, while only statically proven
   unsafe forms become scanner findings. | affects: REQ-008, REQ-010, REQ-011, REQ-012
+- DEC-020 | Treat directories with active writers as non-quiescent and completed command records as
+  the source of truth for tool-evidence claims. | rationale: scanning a live transcript or event
+  directory can create a legitimate race error, but a response must preserve that observed report and
+  exit code rather than relabel it as absent or let a later narrow pass overwrite it. Use a stable
+  bounded artifact, an isolated candidate copy, or defer the scan. | affects: REQ-010, REQ-012,
+  REQ-021
 
 ## Open Questions
 

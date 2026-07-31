@@ -170,6 +170,13 @@ swaps and restores paths entirely between checks. Stop editors, generators, buil
 before scanning. For release evidence, use a quiescent isolated checkout on a trusted runner and
 discard the result if anything else could have modified that checkout during the scan.
 
+An agent session directory is not quiescent while its event stream, transcript, response, or other
+output is still being written. Do not scan that directory as a whole. Use a stable bounded artifact
+or an isolated candidate copy, or defer the scan. Reconcile every claim about a tool call with its
+completed command record. For each scanner or verification used as evidence, preserve the observed
+report or result and exit code, including tool errors, and keep a later narrow pass separate from an
+earlier broader failure or invalid result.
+
 When Git is available, the scanner disables repository fsmonitor execution and uses Git only to
 enumerate tracked plus untracked, non-ignored files. Without Git it falls back to an explicitly labeled
 filesystem scope; that fallback cannot distinguish tracked, ignored, or historical files.

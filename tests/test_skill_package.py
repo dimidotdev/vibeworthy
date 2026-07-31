@@ -295,8 +295,31 @@ class SkillPackageTests(unittest.TestCase):
             "record only commands that were actually executed",
             "only results and exit codes present in their captured output",
             "never infer that another launcher was unavailable, failed",
+            "reconcile every narrative claim and evidence-ledger entry about a tool call",
+            "each scanner or verification used as evidence",
+            "preserve the observed report or result and exit code",
+            "never claim that output or an exit code was absent when the record contains it",
+            "never let a later narrow pass overwrite an earlier broader failure",
+            "whose contents are still being written by a running command",
+            "is not quiescent",
+            "do not scan that directory as a whole",
+            "scan a stable bounded artifact or an isolated candidate copy, or defer the scan",
+            "report narrower coverage explicitly",
         ):
             self.assertIn(phrase, skill)
+
+    def test_readme_preserves_live_writer_and_tool_result_boundaries(self) -> None:
+        readme = normalized_text(REPOSITORY_ROOT / "README.md")
+
+        for phrase in (
+            "agent session directory is not quiescent",
+            "event stream, transcript, response",
+            "reconcile every claim about a tool call with its completed command record",
+            "each scanner or verification used as evidence",
+            "preserve the observed report or result and exit code",
+            "later narrow pass separate from an earlier broader failure",
+        ):
+            self.assertIn(phrase, readme)
 
     def test_v0_adapter_preserves_supply_privacy_and_operations_stop_rules(self) -> None:
         adapter = normalized_text(V0_ADAPTER)

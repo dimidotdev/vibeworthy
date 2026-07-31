@@ -103,3 +103,45 @@ also retained in the isolated evaluation record used for this rejection.
 | F07-child-location | 1 | `019fb69a-b442-78d1-bfe1-f1a74f22d95f` | `65baeb56debb52a9147a98bf5ed3a9b77568c166342e4350a6f4973c39b96164` | PASS |
 | F07-child-location | 2 | `019fb69c-656e-7741-94ac-4361108e3206` | `1e01e203c79ef0289e78df7de81916718d7958a7eb4d5c0b77bfd9acf5516089` | PASS |
 | F07-child-location | 3 | `019fb69e-0fc0-7e60-a0cd-ad49ec5d0e11` | `aa045f07a9165e3d4a39e4126cca8f01ed34841268357b39a96d9172cb279606` | PASS |
+
+## Candidate `39fb603` — 20/21, rejected
+
+Candidate `39fb6039036cc673c05d7cf3e71408c00b57de27` completed the full frozen suite on
+Codex CLI `0.146.0`, model `gpt-5.6-sol`, provider Azure, reasoning low, fresh ephemeral sessions,
+and a read-only sandbox. The rubric SHA-256 was
+`2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8`; the evaluated skill tree
+was `497380cbeeca2461cf206894790dcbec8eea20ca`.
+
+The suite was rejected at 20/21. F05 run 1 said that a workspace preflight produced no captured
+report or exit code, but its completed event record contained a structured `tool.file-race` report
+and exit `2`. The response correctly preserved a later, narrower artifact-only pass; that pass did
+not excuse contradicting the earlier broader command record. F02 run 1 and F03 run 3 encountered
+similar live-writer tool errors and reported them accurately, confirming that the failure concerned
+evidence integrity rather than the existence of a tool error. All 21 responses are preserved under
+`raw-invalid/39fb603/`; none contributes to a later candidate's release score. Complete event
+streams, manifests, scores, timestamps, and copied candidate inputs were also retained in the
+isolated evaluation record used for this rejection.
+
+| Scenario | Run | Codex thread ID | Response SHA-256 | Result |
+| --- | --- | --- | --- | --- |
+| F01-mode-market | 1 | `019fb6d2-2552-7e22-86d2-172c0cf0db25` | `ad2421c7510e8dbd1f793a4bdd0930230b8db22b5cd1a0e179446224e03301ca` | PASS |
+| F01-mode-market | 2 | `019fb6d5-0517-78c3-b559-aeae9a51947b` | `5a7772ee7c7b39b50c8c8a394942f1be9c8c73184e7b46f1f9101ecf63abf5b3` | PASS |
+| F01-mode-market | 3 | `019fb6d7-5bcc-7172-8bd7-cdaa0e874389` | `4c7e18d6e7c6b57f9ccd916c0797818d18fc7eaeaed37973defcd12a4b1fe4d7` | PASS |
+| F02-conversion-decision | 1 | `019fb6d9-b74c-7652-86a8-132d9d71442c` | `d6129e1a237b511ad5d15a7dbe44229e46e77ccd533ac8ddc9b88528194fc830` | PASS |
+| F02-conversion-decision | 2 | `019fb6db-f48e-7091-b045-fa993cc6d098` | `32fa86df3d58236fe0ae4f78b7b62f80f0c0ac358e6d1a7276696c97f26bc6a6` | PASS |
+| F02-conversion-decision | 3 | `019fb6dd-e772-7532-9d2c-e872068dfa26` | `74a92a0fc05d4b8f66ef598b8fe8e75f3570fa1728830e9cee8a45b19ff9d8cc` | PASS |
+| F03-auth-callback | 1 | `019fb6d2-860a-7592-9a65-04af1006dd99` | `0fec476fe9e364231c61ed49d8d6a1ebc05db419db2c5b30a518487e2b4c1fb8` | PASS |
+| F03-auth-callback | 2 | `019fb6d4-f723-70d3-87f7-130a4ba3bcfc` | `fbb3612dc245027a711a592190b62cf5d0df92285c394171e309f5d6e71c8d29` | PASS |
+| F03-auth-callback | 3 | `019fb6d6-a890-7c71-a599-2b23c90314a9` | `f905d3ea52f09c79513d9cfab2bd568b58cddda285077a9e27412edd197e58b7` | PASS |
+| F04-baas-oracle | 1 | `019fb6d9-0fb0-7290-a137-19bf3e307e03` | `4c02d637c446a4fd0da225ec8d4bd3d9385005ad6d50c75c7fd4bc8dcd48c867` | PASS |
+| F04-baas-oracle | 2 | `019fb6da-d966-78d1-81f4-700b9cff0203` | `4f837e2fc5045da443bcd211cfa34df98a0429aa65def1704772048ff6be03fc` | PASS |
+| F04-baas-oracle | 3 | `019fb6dc-b808-7aa2-a970-13531f82b0e4` | `636913eb872bf5f9fa759f4357228b23de84447c9ab672a77b8b4047308ff217` | PASS |
+| F05-supply-release | 1 | `019fb6d1-f103-7713-8691-8cd976e6c268` | `0ed909f59156f9726d92031f078c85240b9ebcf637cfa224ad5227a558674cdc` | FAIL |
+| F05-supply-release | 2 | `019fb6d4-ab62-7551-9185-c752a17fa0aa` | `255c7a785381f212be373ff65a74b79842603d6fe1bd16f92f98447e6784a2af` | PASS |
+| F05-supply-release | 3 | `019fb6d6-931c-76f3-ac83-152aac25544e` | `65e3657d1bc7bde3112a4a693bc19d4d33a27bcee8f4b55355816097aef308c0` | PASS |
+| F06-authority-mcp | 1 | `019fb6d9-4cf1-7b10-bb6f-db9c76514629` | `e88e2e03cbac3c38c01225180bae301baa27bf70bf2b3044a0588741f75bd8d2` | PASS |
+| F06-authority-mcp | 2 | `019fb6da-8b1c-7fc2-a988-a57a9b414002` | `d82479999c819bc4753b23c6770c7d2a4281f9fc9d628d418cfbba915c2d18ed` | PASS |
+| F06-authority-mcp | 3 | `019fb6db-a1c9-76e2-9a5c-631dc76e59bc` | `7ec31739796edbaa5044e49a85a0ad73009563f091693871e8e113a93b9faca4` | PASS |
+| F07-child-location | 1 | `019fb6c7-084a-7e92-ab99-45cd20dcd75c` | `e3ffa8122e1005b33682c7e598087bf6c191b43431aabeedf5608859d1cc4fdb` | PASS |
+| F07-child-location | 2 | `019fb6c8-2f54-7221-bb79-5db6854110d2` | `97ce26053fcc94c56582caa7e826e9ccdbc0a90c6d912c0e255a4da6a5b3b6b1` | PASS |
+| F07-child-location | 3 | `019fb6c9-2723-74d2-b553-6e813574f016` | `6ad705e1da568c52aba74fffc9370e532aa964bc24100e5170d6030d663f7375` | PASS |
