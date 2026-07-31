@@ -282,6 +282,22 @@ class SkillPackageTests(unittest.TestCase):
         ):
             self.assertIn(phrase, adapter)
 
+    def test_full_skill_requires_explicit_mcp_controls_and_observed_command_evidence(self) -> None:
+        skill = normalized_text(SKILL_FILE)
+
+        for phrase in (
+            "method-level least privilege",
+            "destination allowlists",
+            "sandboxed read-only defaults",
+            "attributable audit",
+            "provider data lifecycle",
+            "separate point-of-action approvals",
+            "record only commands that were actually executed",
+            "only results and exit codes present in their captured output",
+            "never infer that another launcher was unavailable, failed",
+        ):
+            self.assertIn(phrase, skill)
+
     def test_v0_adapter_preserves_supply_privacy_and_operations_stop_rules(self) -> None:
         adapter = normalized_text(V0_ADAPTER)
 

@@ -1,0 +1,4 @@
+# Forward-evaluation responses are immutable raw evidence. Preserve intentional Markdown hard breaks.
+tests/forward/raw-final/** -whitespace
+tests/forward/raw-initial/** -whitespace
+tests/forward/raw-invalid/** -whitespace

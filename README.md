@@ -135,10 +135,14 @@ The scanner uses Python 3.11 or newer and only the standard library. It reads th
 redacts matched values, and emits text, JSON, or SARIF:
 
 ```bash
-python -I skill/vibeworthy/scripts/preflight.py /path/to/project
-python -I skill/vibeworthy/scripts/preflight.py /path/to/project --format json
-python -I skill/vibeworthy/scripts/preflight.py /path/to/project --format sarif
+python3 -I skill/vibeworthy/scripts/preflight.py /path/to/project
+python3 -I skill/vibeworthy/scripts/preflight.py /path/to/project --format json
+python3 -I skill/vibeworthy/scripts/preflight.py /path/to/project --format sarif
 ```
+
+Use the installed Python 3.11+ launcher for the platform (`python3` is typical on POSIX and `python`
+on Windows). Report a launcher failure only when that exact command was executed and its result was
+captured.
 
 Keep `-I`: isolated mode prevents project-controlled Python startup and import hooks from running
 before the scanner can inspect the target.

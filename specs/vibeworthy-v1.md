@@ -6,7 +6,7 @@ profile: critical
 mode: deliver
 owner: "dimidotdev"
 created: 2026-07-30
-updated: 2026-07-30
+updated: 2026-07-31
 ---
 
 # VibeWorthy portable market, engineering, and security skill
@@ -118,14 +118,17 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 
 ## Current Behavior
 
-A complete VibeWorthy candidate now exists in a private canonical GitHub repository, including the
-Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
-license/provenance records, and release documentation. It remains private, untagged, and unreleased;
-the exact candidate has not yet completed cross-platform CI, independent exact-SHA review, the frozen
-21-response forward suite, public import checks, attestations, or durable release verification. The
-localized dimi.dev.br article/project is drafted but is not published in production D1 or deployed.
-The source skills still solve adjacent parts under different licenses and invocation models, while
-Lovable and Bolt can import Agent Skills and v0 currently exposes reusable Instructions.
+A complete VibeWorthy implementation now exists in the public canonical GitHub repository, including
+the Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
+license/provenance records, and release documentation. Candidate
+`3f840d1f750d569c8f60567e16bca5d4a841ce98` passed cross-platform CI, exact-SHA technical review,
+and the release rehearsal, but was rejected at 18/21 by the frozen forward suite because three
+responses invented launcher evidence and one also omitted a required MCP audit control. Those raw
+responses are preserved as invalid evidence and cannot support release. The corrective worktree is
+not yet a frozen candidate; no `v1.0.0` tag or durable release exists. The localized dimi.dev.br
+article/project is drafted but is not published in production D1 or deployed. The source skills
+still solve adjacent parts under different licenses and invocation models, while Lovable and Bolt
+can import Agent Skills and v0 currently exposes reusable Instructions.
 
 ## Proposed Behavior
 
