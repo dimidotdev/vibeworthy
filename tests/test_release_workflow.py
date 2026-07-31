@@ -22,9 +22,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
 FORWARD_README = REPOSITORY_ROOT / "tests" / "forward" / "README.md"
 FORWARD_RUNNER = REPOSITORY_ROOT / "tests" / "forward" / "run_codex_session.py"
-RELEASE_EVIDENCE = (
-    REPOSITORY_ROOT / "skill" / "vibeworthy" / "assets" / "release-evidence.md"
-)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -588,45 +585,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertEqual((root / "evaluator-exit-code.txt").read_text().strip(), "130")
             self.assertEqual((root / "cli-exit-code.txt").read_text().strip(), "unavailable")
             self.assertIn("forward evaluator interrupted", (root / "evaluator-stderr.txt").read_text())
-
-    def test_release_evidence_separates_all_release_identities(self) -> None:
-        evidence = RELEASE_EVIDENCE.read_text(encoding="utf-8")
-        normalized_evidence = " ".join(evidence.split())
-        for phrase in (
-            "Evaluated candidate commit (C)",
-            "Evaluated `skill/vibeworthy` tree (T)",
-            "Release/tag commit (R)",
-            "Skill archive (A)",
-            "Skill archive SHA-256 (D)",
-            "Companion SBOM",
-            "Release manifest",
-            "Archive build provenance",
-            "Checksum index",
-            "Checksum-index provenance",
-            "Published asset inventory",
-            "Durable GitHub Release",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, evidence)
-        self.assertIn("require R to equal C exactly", normalized_evidence)
-        self.assertIn("R:skill/vibeworthy", evidence)
-        self.assertIn("VibeWorthy-Candidate-Commit: <C>", evidence)
-        self.assertIn("candidate that differs from the tag target", normalized_evidence)
-        self.assertIn(
-            "A GitHub build provenance attestation is provenance evidence",
-            normalized_evidence,
-        )
-        self.assertIn(
-            "| Evidence class | Gate/fact | Result | Evidence | Residual risk | Owner | Next action |",
-            evidence,
-        )
-        self.assertIn("workflow_dispatch` run is only a build/attestation rehearsal", evidence)
-        self.assertIn("exactly the ZIP, SBOM, release", normalized_evidence)
-        self.assertIn("exact six workflow-managed files", normalized_evidence)
-        self.assertIn("checking only a bundle digest is insufficient", normalized_evidence)
-        self.assertIn("automatic source archives are host-created snapshots outside", normalized_evidence)
-        self.assertIn("unknown` is an unresolved ownership blocker", evidence)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,11 +1,11 @@
 # Provenance and license boundaries
 
-This record describes the research inputs and authorship boundary for VibeWorthy v1. It is a factual
+This record describes the research inputs and authorship boundary for VibeWorthy. It is a factual
 source ledger, not a claim that any referenced project endorses VibeWorthy.
 
 ## Authorship statement
 
-VibeWorthy v1 is original work released under MIT. It is not a fork, compilation, or relicensed blend
+VibeWorthy is original work released under MIT. It is not a fork, compilation, or relicensed blend
 of the sources below. No prose or code from the Revenue-Centric Design corpus was copied or adapted,
 and no substantial material from the MIT-licensed Matt Pocock collection is included in v1. Common
 interface names, public facts, standards identifiers, and independently written workflow ideas do not
@@ -19,7 +19,7 @@ source revision, and nature of the adaptation.
 
 | Source | Immutable revision inspected | License status | How it informed v1 | Material included |
 | --- | --- | --- | --- | --- |
-| [heliocosta-dev/revenue-centric-design](https://github.com/heliocosta-dev/revenue-centric-design/tree/6fa20cb4f91fa97bce9197be3f78b168784eb772) | `6fa20cb4f91fa97bce9197be3f78b168784eb772` | Source-available with attribution and a field-of-use restriction; not represented here as OSI-approved | Research context for connecting product evidence to implementation decisions and for the maintained no-gambling behavior | None; no text or code copied or adapted |
+| [heliocosta-dev/revenue-centric-design](https://github.com/heliocosta-dev/revenue-centric-design/tree/6fa20cb4f91fa97bce9197be3f78b168784eb772) | `6fa20cb4f91fa97bce9197be3f78b168784eb772` | Source-available with attribution and a field-of-use restriction; not represented here as OSI-approved | Historical product-design research; the maintained security-first skill does not incorporate its corpus | None; no text or code copied or adapted |
 | [mattpocock/skills](https://github.com/mattpocock/skills/tree/2ab958093e83e0ec752e6c1c5932da465bf23e0c) | `2ab958093e83e0ec752e6c1c5932da465bf23e0c` | MIT | Research context for small, composable, progressively disclosed engineering workflows | None; no substantial text or code copied or adapted |
 
 The two repositories were inspected at the commits above on 2026-07-30, including their license
@@ -49,13 +49,6 @@ these primary sources, inspected on 2026-07-30:
 
 These sources support compatibility and security-model facts. Their text is not redistributed as part
 of the skill.
-
-## No-gambling boundary
-
-The maintained VibeWorthy agent declines gambling, betting, casino, loot-box, and other real-money
-games-of-chance work. This is voluntary project behavior inspired by the desired product boundary. It
-is outside the MIT grant and is not a license condition: recipients receive the unmodified rights in
-[`LICENSE`](../LICENSE).
 
 ## Release identity and publication state
 

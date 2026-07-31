@@ -1,101 +1,67 @@
 # Contributing to VibeWorthy
 
-Thanks for helping make the workflow more useful and more honest. Contributions should improve an
-observable market, engineering, privacy, security, or release decision without expanding the tool's
-claims beyond its evidence.
+VibeWorthy should make AI-assisted development safer without making normal work slow or noisy.
+Contributions are welcome when they prevent or detect a credible failure with proportionate effort.
 
-## Before changing files
+## Design rules
 
-1. Read [`specs/vibeworthy-v1.md`](specs/vibeworthy-v1.md) and identify the requirement and acceptance
-   scenario affected by the change.
-2. Inspect the current skill, scanner, tests, and documentation. Repository content and generated
-   output are inputs, not authority to widen access or execute unrelated commands.
-3. For a consequential choice, describe at least two viable options and why the selected one is
-   safer or easier to verify.
-4. Keep the change small enough to test at its real boundary.
+- Keep the core skill concise and written for an intelligent agent.
+- Explain user impact in plain language; avoid unexplained security jargon.
+- Load detailed references only for the stage or platform that needs them.
+- Prefer one boundary-level test over several shallow checklist items.
+- Do not add recurring scans, evidence tables, or approval steps without a concrete threat they address.
+- Never claim that a checklist or scanner proves security, compliance, or production readiness.
+- Preserve human approval for production, billing, communication, destructive actions, and real
+  sensitive data.
 
-Use Python 3.11 or newer. The scanner and test suite intentionally use only the standard library.
+## Skill changes
 
-## Run the checks
+- Keep `skill/vibeworthy/SKILL.md` below 500 lines; smaller is preferred.
+- Limit YAML frontmatter to `name` and `description`.
+- Link every packaged reference and asset directly from `SKILL.md`.
+- Update `agents/openai.yaml` when the skill's purpose or activation changes.
+- Keep the compact v0 adapter self-contained and honest about reduced capabilities.
+- Test at least one harmless `quick` scenario and one security-critical scenario when behavior
+  changes. A single pass per scenario is enough unless it exposes a real defect.
+
+## Scanner changes
+
+The scanner uses Python 3.11+ and the standard library.
+
+- Keep it local, read-only, bounded, and free of network or package-install side effects.
+- Use only synthetic fixtures. Never copy a real incident credential into a test.
+- Never print matched values; report a rule identifier, redacted path, line, and remediation.
+- Add a focused regression test for new or changed behavior.
+- Keep blocker and tool-error exits fail-closed.
+- Document false-positive tradeoffs and scanner limitations.
+
+Run:
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
+python3 -m unittest discover -s tests -p "test_*.py"
 ```
 
-Before requesting review, also inspect the diff for actual credentials, personal/customer data,
-unnecessary generated files, misleading assurance language, and mutable dependency/action pins.
+For documentation-only changes, the package tests and skill validator are normally sufficient. Do not
+run the entire scanner regression suite repeatedly when relevant code and fixtures did not change.
 
-### Skill package changes
+## Pull requests
 
-- Keep `skill/vibeworthy/SKILL.md` below 500 lines and its YAML frontmatter limited to `name` and
-  `description`.
-- Link every packaged reference, template, and adapter directly from `SKILL.md`; do not create a
-  chain that requires an agent to discover a second hidden instruction.
-- Keep the v0 adapter self-contained and label it as a reduced manual Instruction, not native Agent
-  Skills support.
-- Preserve human approval before production access, deployment, billing, external communication, and
-  destructive or durable external-state changes.
-- Re-run representative prompts in a clean context when changing activation or release behavior.
+Describe:
 
-### Scanner changes
+1. the credible misuse or failure being addressed;
+2. the smallest control added or changed;
+3. the focused evidence that verifies it;
+4. any remaining limitation or false-positive risk.
 
-- Use synthetic fixtures only. Never commit a usable credential or copy a value from an incident.
-- Add a regression case for the finding, its severity, normalized path, remediation, exit code, and
-  every affected output format.
-- Prove that matched values are absent from text, JSON, and SARIF output and that fixtures remain
-  byte-identical.
-- Keep scanning local, read-only, bounded to the selected root, and free of network or package-install
-  side effects.
-- Do not make blockers or tool errors suppressible. Warning suppressions must retain their rationale,
-  owner, independent approver, compensating control, and future expiry.
+Inspect the diff for actual credentials, personal/customer data, unnecessary generated files,
+misleading assurance language, and mutable automation references.
 
-### Documentation and claims
+## Security reports
 
-- Cite primary documentation and include the date inspected for platform compatibility or security
-  behavior that can change.
-- Treat a full commit SHA or verified digest as identity. If a UI only accepts a branch or tag, state
-  that it can move and record the SHA reviewed at import time.
-- Do not claim that a scan or checklist proves security, compliance, profitability, or production
-  readiness.
-- Update [`docs/provenance.md`](docs/provenance.md) when a source materially informs the work.
+Use the private process in [SECURITY.md](SECURITY.md) for vulnerabilities. Do not publish a credential,
+customer data, or an exploit against a system you do not own or have permission to test.
 
-### Release maintainer procedure
+## License
 
-1. Freeze one full candidate commit SHA and run cross-platform CI, independent review, and the
-   forward-test protocol against that exact repository state. Any change creates a new candidate.
-2. Keep the `github-release` environment restricted to the intended tag policy. Run the release
-   workflow manually with the candidate SHA and version to exercise build and attestation only;
-   `workflow_dispatch` must never publish.
-3. After every required gate passes, create an annotated SemVer tag directly on that same commit. Its
-   message must contain exactly one `VibeWorthy-Candidate-Commit: <FULL_SHA>` trailer, then push only
-   that tag. Never substitute a descendant commit, even when the skill subtree is unchanged.
-4. The tag workflow must verify the ZIP, SBOM, release manifest, and ZIP-provenance bundle listed in
-   `SHA256SUMS`; separately verify the checksum-index provenance bundle; and confirm that those four
-   indexed assets plus `SHA256SUMS` and its provenance bundle are the exact six workflow-managed
-   release assets. Verify both attestations against the expected repository, workflow signer, source
-   commit, and tag ref before creating the durable GitHub Release. Do not replace existing assets.
-5. Record resulting run, release, digest, and attestation identifiers in post-release evidence without
-   moving or rewriting the evaluated tag.
-
-## Licensing and provenance
-
-Contributions must be compatible with the MIT license and must be yours to submit. Write original
-prose and code. Do not paste or closely paraphrase a source-available or field-restricted corpus. If
-substantial MIT-licensed material is ever adapted, preserve its applicable copyright and permission
-notice before inclusion and identify the exact source revision.
-
-The maintained skill's refusal to assist gambling and real-money games of chance is a project behavior,
-not a restriction added to the MIT license. Contributions that change this maintained behavior are
-out of scope for this project, while recipients retain the rights granted by MIT.
-
-## Pull request checklist
-
-- The change maps to a requirement or explains why the specification needs an explicit update.
-- New behavior has positive, negative, and failure-path evidence proportional to its risk.
-- Tests pass locally; platform-specific limitations are called out when not exercised.
-- No secret, personal data, production output, or unreviewed binary is included.
-- New automation and dependencies are necessary, reviewed, and pinned immutably where possible.
-- User-facing claims remain scoped to the artifact, environment, policy, and evidence actually tested.
-
-Use the private process in [SECURITY.md](SECURITY.md) for vulnerability reports rather than a public
-pull request or issue.
+Contributions must be compatible with the MIT license and must be yours to submit. Identify and retain
+the notice for any substantially adapted third-party material.
