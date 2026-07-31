@@ -121,15 +121,17 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 A complete VibeWorthy implementation now exists in the public canonical GitHub repository, including
 the Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
 license/provenance records, and release documentation. Candidate
-`39fb6039036cc673c05d7cf3e71408c00b57de27` passed cross-platform CI, exact-SHA technical review,
-and the release rehearsal, but was rejected at 20/21 by the frozen forward suite because one response
-contradicted a captured scanner report and exit code. Its predecessor `3f840d1` was rejected at 18/21
-for invented launcher evidence and an omitted MCP audit control. Both raw suites are preserved as
-invalid evidence and cannot support release. The corrective worktree is not yet a frozen candidate;
-no `v1.0.0` tag or durable release exists. The localized dimi.dev.br article/project is drafted but
-is not published in production D1 or deployed. The source skills still solve adjacent parts under
-different licenses and invocation models, while Lovable and Bolt can import Agent Skills and v0
-currently exposes reusable Instructions.
+`097a7bb1298b9e9ab3b8b6689cf364bb7a526030` passed cross-platform CI, exact-SHA technical review,
+and the release rehearsal, but was rejected by a focused F05 proof at 2/3 before the full suite: one
+response scanned a live session directory, omitted that invocation, and invented a later narrow
+scanner result from a command record that contained no scanner report. Candidate `39fb603` was
+previously rejected at 20/21 for contradicting a captured report and exit, and `3f840d1` at 18/21 for
+invented launcher evidence and an omitted MCP audit control. Their raw responses and the decisive
+`097a7bb` command record are preserved as invalid evidence and cannot support release. The corrective
+worktree is not yet a frozen candidate; no `v1.0.0` tag or durable release exists. The localized
+dimi.dev.br article/project is drafted but is not published in production D1 or deployed. The source
+skills still solve adjacent parts under different licenses and invocation models, while Lovable and
+Bolt can import Agent Skills and v0 currently exposes reusable Instructions.
 
 ## Proposed Behavior
 
@@ -545,6 +547,14 @@ while linking to the full references for manual use.
   `tool.file-race` report and exit `2`. A later narrow pass did not erase that contradiction. The
   other 20 passes are non-transferable; the next exact candidate requires a fresh 21/21 suite.
   Evidence: `tests/forward/invalid-evidence.md` and `tests/forward/raw-invalid/39fb603/`.
+- AUDIT-HIST-017 | failed | A focused three-run F05 proof rejected candidate
+  `097a7bb1298b9e9ab3b8b6689cf364bb7a526030` at 2/3 before the full suite. Run 3 scanned a live
+  session directory, omitted that broad invocation, and claimed a later artifact-only pass whose
+  command record contained neither scanner report nor scanner exit. The candidate's green CI,
+  technical audits, and rehearsal are non-transferable; the next candidate requires a fresh focused
+  proof followed by a fresh 21/21 suite. Evidence: `tests/forward/invalid-evidence.md` and
+  `tests/forward/raw-invalid/097a7bb-focal/`; decisive event SHA-256
+  `d10e457b63f103269c63fbac9e0ede2f698851d644f1631fe398b6d181b94088`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -713,6 +723,13 @@ while linking to the full references for manual use.
   exit code rather than relabel it as absent or let a later narrow pass overwrite it. Use a stable
   bounded artifact, an isolated candidate copy, or defer the scan. | affects: REQ-010, REQ-012,
   REQ-021
+- DEC-021 | Use an explicit four-step scanner-evidence protocol: establish a stable target before
+  invocation; prohibit default `.` in a live or unproven session directory; run the scanner as the
+  only substantive command; require its rendered report and process exit in the completed record;
+  and inventory every invocation in the response. | rationale: prose about quiescence and later
+  reconciliation did not reliably prevent a compound command from scanning a live directory or a
+  missing narrow result from being reconstructed. An invalid broad scan remains visible regardless
+  of exit `0` or a later pass. | affects: REQ-010, REQ-012, REQ-021
 
 ## Open Questions
 

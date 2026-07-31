@@ -177,6 +177,18 @@ completed command record. For each scanner or verification used as evidence, pre
 report or result and exit code, including tool errors, and keep a later narrow pass separate from an
 earlier broader failure or invalid result.
 
+Whenever a scan is executed or attempted—even if it will not be cited—never target any directory
+with an active writer and do not rely on default `.` inside a live agent session. Choose an explicit
+stable file or isolated candidate path first. Run the scanner as the only substantive command in
+that tool call—not as one segment of a `cat`/`find`/`sed` command list, pipe, substitution, or
+redirected command. After each attempt, preserve whichever of the rendered report and process exit
+code is present, and mark each missing component individually as `report: unavailable` or `exit
+code: unavailable`. If either is unavailable, record `result: unresolved`; do not reconstruct a pass
+from hashes, metadata, another invocation, or expectation. When the report is unavailable, also
+record `coverage: unavailable`; a requested target alone does not establish what was scanned.
+The final evidence must account for every scan attempt, including any invalid live-directory scan,
+even when a later narrow scan passes. `--help` and `--version` are metadata calls, not scan attempts.
+
 When Git is available, the scanner disables repository fsmonitor execution and uses Git only to
 enumerate tracked plus untracked, non-ignored files. Without Git it falls back to an explicitly labeled
 filesystem scope; that fallback cannot distinguish tracked, ignored, or historical files.

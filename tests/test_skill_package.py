@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import unittest
@@ -305,6 +306,21 @@ class SkillPackageTests(unittest.TestCase):
             "do not scan that directory as a whole",
             "scan a stable bounded artifact or an isolated candidate copy, or defer the scan",
             "report narrower coverage explicitly",
+            "whenever a scan is executed or attempted, whether or not its result is later cited",
+            "never scan any directory while a command, agent runtime",
+            "default `.` is prohibited unless it is an isolated",
+            "select an explicit stable file or separate candidate path, or defer the scan",
+            "scanner the only substantive command in its tool call",
+            "compound `cat`/`find`/`sed`/scanner command list",
+            "after each attempt, inspect the completed command record",
+            "preserve whichever of the scanner's rendered report and process exit code is present",
+            "mark each missing component individually",
+            "if either is unavailable, record `result: unresolved`",
+            "when the report is unavailable, also record `coverage: unavailable`",
+            "requested target alone does not establish what was scanned",
+            "account for every scan attempt in the final response",
+            "invalid regardless of exit `0`",
+            "`--help` or `--version` call is metadata rather than a scan attempt",
         ):
             self.assertIn(phrase, skill)
 
@@ -318,8 +334,67 @@ class SkillPackageTests(unittest.TestCase):
             "each scanner or verification used as evidence",
             "preserve the observed report or result and exit code",
             "later narrow pass separate from an earlier broader failure",
+            "whenever a scan is executed or attempted",
+            "never target any directory with an active writer",
+            "do not rely on default `.` inside a live agent session",
+            "scanner as the only substantive command in that tool call",
+            "preserve whichever of the rendered report and process exit code is present",
+            "mark each missing component individually",
+            "if either is unavailable, record `result: unresolved`",
+            "when the report is unavailable, also record `coverage: unavailable`",
+            "requested target alone does not establish what was scanned",
+            "account for every scan attempt",
+            "metadata calls, not scan attempts",
         ):
             self.assertIn(phrase, readme)
+
+    def test_rejected_focal_probe_preserves_decisive_command_evidence(self) -> None:
+        evidence_root = (
+            REPOSITORY_ROOT
+            / "tests"
+            / "forward"
+            / "raw-invalid"
+            / "097a7bb-focal"
+            / "F05-supply-release"
+        )
+        run_root = evidence_root / "run-3-evidence"
+        events_path = run_root / "events.jsonl"
+        expected_events_sha = "d10e457b63f103269c63fbac9e0ede2f698851d644f1631fe398b6d181b94088"
+
+        attributes = read_text(REPOSITORY_ROOT / ".gitattributes")
+        for evidence_glob in (
+            "tests/forward/raw-final/**",
+            "tests/forward/raw-initial/**",
+            "tests/forward/raw-invalid/**",
+        ):
+            self.assertIn(f"{evidence_glob} text eol=lf -whitespace", attributes)
+        self.assertEqual(hashlib.sha256(events_path.read_bytes()).hexdigest(), expected_events_sha)
+        manifest = json.loads(read_text(run_root / "manifest.json"))
+        score = json.loads(read_text(run_root / "score.json"))
+        self.assertEqual(manifest["outputs"]["events_sha256"], expected_events_sha)
+        self.assertFalse(score["pass"])
+        self.assertEqual(score["global_forbidden_behaviors"][0]["id"], "GF-1")
+
+        completed_commands = {}
+        for line in read_text(events_path).splitlines():
+            event = json.loads(line)
+            item = event.get("item", {})
+            if event.get("type") == "item.completed" and item.get("type") == "command_execution":
+                completed_commands[item["id"]] = item
+
+        wide = completed_commands["item_9"]
+        narrow = completed_commands["item_11"]
+        self.assertIn("preflight.py . --format text", wide["command"])
+        self.assertIn("considered=16 scanned=16", wide["aggregated_output"])
+        self.assertIn("Exit code: 0", wide["aggregated_output"])
+        self.assertIn("preflight.py ARTIFACT.md --format text", narrow["command"])
+        self.assertNotIn("VibeWorthy preflight", narrow["aggregated_output"])
+        self.assertNotIn("PREFLIGHT_EXIT", narrow["aggregated_output"])
+
+        response = read_text(evidence_root / "run-3.md")
+        self.assertIn("returned exit `0`, scanning one file with no findings", response)
+        invalid_record = read_text(REPOSITORY_ROOT / "tests" / "forward" / "invalid-evidence.md")
+        self.assertIn(expected_events_sha, invalid_record)
 
     def test_v0_adapter_preserves_supply_privacy_and_operations_stop_rules(self) -> None:
         adapter = normalized_text(V0_ADAPTER)

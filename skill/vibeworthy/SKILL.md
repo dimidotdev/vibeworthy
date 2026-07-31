@@ -177,6 +177,28 @@ equivalent to the workspace. For release evidence, scan an isolated checkout on 
 with no editor, generator, build, or other concurrent writer; otherwise record the scan as invalid
 rather than clean.
 
+Use this protocol whenever a scan is executed or attempted, whether or not its result is later cited
+as evidence:
+
+1. Establish the target before invocation. Never scan any directory while a command, agent runtime,
+   or other process writes anywhere inside it. The default `.` is prohibited unless it is an isolated
+   checkout or candidate copy already proven quiescent. If the current session writes an event
+   stream, transcript, response, or log in the working directory, select an explicit stable file or
+   separate candidate path, or defer the scan.
+2. Make the scanner the only substantive command in its tool call. Do not place it in a compound
+   `cat`/`find`/`sed`/scanner command list or hide its output with a pipe, substitution, or redirection.
+3. After each attempt, inspect the completed command record. Preserve whichever of the scanner's
+   rendered report and process exit code is present; mark each missing component individually as
+   `report: unavailable` or `exit code: unavailable`. If either is unavailable, record `result:
+   unresolved`; never reconstruct a result from a hash, file metadata, another invocation, or
+   expectation. Coverage comes from the report: when the report is unavailable, also record
+   `coverage: unavailable`; the requested target alone does not establish what was scanned.
+4. Account for every scan attempt in the final response with its target, coverage, result, and exit
+   code, using those unavailable sentinels when necessary. A scan of a directory with an active
+   writer is invalid regardless of exit `0` and must remain visible beside any later, narrower valid
+   scan. A `--help` or `--version` call is metadata rather than a scan attempt; if cited, report only
+   the output and exit actually present in its completed record.
+
 For public release, also require relevant authorization matrices, secret-history review, privacy review, dependency and known-exploited-vulnerability review, transitive SBOM, immutable automation pins, artifact provenance or signature, digest verification, backup/restore evidence, migration recovery, alert ownership, and containment. Record missing evidence as missing.
 
 ## 7. Decide release status
