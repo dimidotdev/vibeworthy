@@ -27,6 +27,21 @@ Requests involving public endpoints, real user data, authentication, payments, p
 integrations, destructive actions, or other external side effects receive the `ship` safety gates
 even when they are described as prototypes.
 
+## Evidence integrity
+
+VibeWorthy requires a pre-response reconciliation for every tool-derived or workspace-derived claim,
+not only scanner results. A statement that a command ran, failed, emitted output, or returned an exit
+code must match that exact completed command record. Presence, absence, counts, contents, and “only
+this file exists” claims require an adequately scoped completed inspection that could have observed
+the exact item.
+
+A compound, failed, interrupted, or partial tool call proves only the facts its record explicitly
+captured. Silence, expected behavior, an artifact narrative, user-provided text, or a different
+invocation is not execution evidence. If a fact was not established, report it as `not inspected` or
+`unverified`, keep user-provided and artifact-reported facts labeled, and reconcile prose, tables,
+release ledgers, and action summaries before responding. A claim about current state also needs an
+inspection after the last relevant recorded mutation, or an explicit observation-time qualifier.
+
 ## Review before installing
 
 An Agent Skill can influence tool use and may include executable files. Read every file under
@@ -173,9 +188,9 @@ discard the result if anything else could have modified that checkout during the
 An agent session directory is not quiescent while its event stream, transcript, response, or other
 output is still being written. Do not scan that directory as a whole. Use a stable bounded artifact
 or an isolated candidate copy, or defer the scan. Reconcile every claim about a tool call with its
-completed command record. For each scanner or verification used as evidence, preserve the observed
-report or result and exit code, including tool errors, and keep a later narrow pass separate from an
-earlier broader failure or invalid result.
+completed command record and the general evidence-integrity protocol above. For each scanner or
+verification used as evidence, preserve the observed report or result and exit code, including tool
+errors, and keep a later narrow pass separate from an earlier broader failure or invalid result.
 
 Whenever a scan is executed or attempted—even if it will not be cited—never target any directory
 with an active writer and do not rely on default `.` inside a live agent session. Choose an explicit

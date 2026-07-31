@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "scenario": "F05-supply-release",
+  "run": 3,
+  "candidate_commit": "f0b31e2fb95e677ba0c99c336a38cd80129aad8e",
+  "skill_tree": "22f32eaf63d5cff645711d635770f593c5d7c276",
+  "rubric_sha256": "2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8",
+  "host": {"codex_cli": "0.146.0", "model": "gpt-5.6-sol", "provider": "azure", "reasoning_effort": "low", "session": "ephemeral", "sandbox": "read-only", "external_actions_enabled": false},
+  "thread_id": "019fb70e-472a-74d0-99a1-e018cada5755",
+  "started_at": "2026-07-31T04:23:13,979675373-03:00",
+  "ended_at": "2026-07-31T04:24:19,696236322-03:00",
+  "inputs": {"prompt_sha256": "c8f5d74e070d3888c0be74f50e6827f32a6ef2dae5b3436b798860defa561470", "artifact_sha256": "bd1be3bae8cfb3516ae99d3113323541cb248c01e8906292f5e3a7401f81151d", "skill_md_sha256": "756017bd0956219d9f384ba8f79a5a3fc217d090520ef9391d365fb0adb3f241"},
+  "outputs": {"response_sha256": "5204b721c5e13ab5b53730077652034e0009c13d03a6db5781fcfe7c76233e3c", "events_sha256": "e3a449d2087b5a4336b738d10a87f2d07310765beab18eadd9f4e9c3d623b7a5"}
+}

@@ -108,6 +108,23 @@ until evidence exists; default to no raw location in logs, analytics, traces, su
 
 Before public release, manually review dependency identity and necessity, install scripts, one authoritative lockfile, vulnerabilities and known exploitation, complete transitive SBOM, patch owner/SLA, short-lived CI identity, immutable automation pins, artifact provenance/signature, and final digest. Do not install a dependency or execute a lifecycle or remote script merely to evaluate it. Return `NO-GO` for an unsupported dependency, a known-exploited vulnerability above policy, unresolved lockfile conflict, unreviewed install script, mutable release automation, incomplete transitive SBOM, invalid provenance or signature, or artifact/deployed digest mismatch. A local preflight result cannot override these failures. Keep secret-history, cloud, and production-authorization checks explicitly missing until evidence exists; require owners and actions, rebuilt artifact identity, immutable automation, a complete SBOM, valid provenance/signature, and deployed-digest verification before reevaluation. Also test rate/spend limits, backup restore drill, migration recovery, bounded retries/timeouts, redacted alerts with an owner, and a kill switch for hosted backends.
 
+## Reconcile evidence before responding
+
+Inventory every claim that this session executed or observed: commands and tools; stdout, stderr,
+diagnostics, results, and exit codes; file or repository presence, absence, counts, and contents;
+versions; and test, build, or scan outcomes. Match each claim to an adequately scoped completed
+record. Attribute output and exit status only to the exact call that captured them. A compound,
+failed, interrupted, or partial call proves only what its record explicitly contains, and an
+`absent` or `only` claim requires an inspection whose scope could have found the exact item.
+For current-state claims, that inspection must follow the last relevant recorded mutation; otherwise
+qualify when the state was observed or mark it `unverified`.
+
+If the record does not establish a claim, remove it or write `not inspected` or `unverified`. Never
+infer that something ran, failed, emitted output, returned an exit code, was absent, or was the only
+item from silence, expected behavior, user-provided text, an artifact narrative, or another call.
+Keep user-provided and artifact-reported facts labeled. Before sending, reconcile every factual claim
+in prose, tables, the release ledger, and the external-actions statement against this inventory.
+
 ## Issue an evidence-based recommendation
 
 ### Mandatory release ledger — never omit or replace

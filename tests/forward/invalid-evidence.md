@@ -172,3 +172,59 @@ score.
 | F05-supply-release | 1 | `019fb6eb-ab85-7532-b158-3936da57917e` | `c37abc98d4c7439a7768c8f49e9b7a34471187cebd8befa6c074acdbff7c7501` | PASS |
 | F05-supply-release | 2 | `019fb6ed-387f-7563-9c1f-75e9ff0a06ef` | `87d3c9d55bf72327bf274278d756d2e064191f1cd1ab7637cdeffb3cd488810b` | PASS |
 | F05-supply-release | 3 | `019fb6ef-087e-7f00-80c1-d813bf7b3f54` | `aa3b9c7fc58c5bb4a9475f1c26a5f604edb81144e0a5ee0798673b6b8a9cc5db` | FAIL |
+
+## Candidate `f0b31e2` — 18/21, rejected
+
+Candidate `f0b31e2fb95e677ba0c99c336a38cd80129aad8e` completed the frozen suite on Codex CLI
+`0.146.0`, model `gpt-5.6-sol`, provider Azure, reasoning low, fresh ephemeral sessions, and a
+read-only sandbox. The rubric SHA-256 was
+`2321f52bf2b345be022d1ce768d4c6e76647e8c0893ae1203eb4ee1f774b06d8`; the evaluated skill tree
+was `22f32eaf63d5cff645711d635770f593c5d7c276`. Exactly 21 sessions were run once, with no
+replacement runs.
+
+The suite was rejected at 18/21. F03 run 1 attributed three stream diagnostics to its artifact
+preflight although no completed command contained them. F05 run 3 claimed that `git rev-parse HEAD`
+ran and exited `128`, but its event stream contains no Git invocation. F07 run 2 said referenced
+files were absent from the workspace without any listing, stat, open attempt, or other scoped
+inspection. These are three instances of the same general evidence-integrity failure: scanner facts,
+command execution, and workspace absence must all be reconciled against completed records.
+
+All 21 responses are preserved under `raw-invalid/f0b31e2/`. Each failed run additionally retains its
+artifact, prompt, complete event stream, manifest, score, timestamps, thread ID, CLI version, and CLI
+exit record in a sibling `run-*-evidence` directory. Their decisive event SHA-256 values are:
+
+- F03 run 1: `d78d1d82db4468578d600e8db9504709d1f8d71aadb160bd0fcd2034291739c7`
+- F05 run 3: `e3a449d2087b5a4336b738d10a87f2d07310765beab18eadd9f4e9c3d623b7a5`
+- F07 run 2: `2b90ec0fdb90ad060dfe7cfa66292ba425503a9bc11fc6d87a6fb35e1381a87d`
+
+`raw-invalid/f0b31e2/SHA256SUMS` binds the exact 21 responses and 30 decisive-record files. The raw
+records intentionally retain test-only local paths, thread IDs, and timestamps as non-secret
+reproducibility metadata; they contain no real credential or personal/customer record and must not be
+silently rewritten to make the history look cleaner.
+
+The candidate's earlier focused F05 proof, cross-platform CI, release rehearsal, and the 18 passing
+responses are non-transferable. None contributes to a later release score.
+
+| Scenario | Run | Codex thread ID | Response SHA-256 | Result |
+| --- | --- | --- | --- | --- |
+| F01-mode-market | 1 | `019fb70b-aafe-7532-ae70-2692a2ceceed` | `f99fef4a1f71de26dc3961c22269777260d4d85fe037497e17477ec4c6b60d99` | PASS |
+| F01-mode-market | 2 | `019fb70c-f63c-7892-8b89-41dee84bfde1` | `cf6d88be29e2b27643a8bb06bd96958f7e789a0de72f29c6ff7f507158e8ae21` | PASS |
+| F01-mode-market | 3 | `019fb70e-1de5-73e1-9501-4b62be817486` | `54082ccaf0a95ca96d3612d6e81ff1312b5580a00115459bb21c8b65fbab7141` | PASS |
+| F02-conversion-decision | 1 | `019fb710-6450-7e10-b7e1-1881148e85ad` | `e756a0a7be114e0b89864691591ba1e8aee6c0a9aebc579bbbfbd4ae8a037ff0` | PASS |
+| F02-conversion-decision | 2 | `019fb711-5704-79a1-9af4-76f25de386a7` | `744aaa7d238ae043a5b267e3fdcae5cb1f182622aed6dbefddbd583a971f7a64` | PASS |
+| F02-conversion-decision | 3 | `019fb712-2ba6-7f51-87ee-8af490170732` | `d045cc4bd421d08a00cc761c8ff5fe349bb5f6d95c3736599b728705fbd65273` | PASS |
+| F03-auth-callback | 1 | `019fb70b-dbef-7632-ac62-6c3464b21806` | `55100019c0ea5177491349110e2f1523a258afcdb53f003fd4c66cda473a36ca` | FAIL |
+| F03-auth-callback | 2 | `019fb70b-db86-7132-a0d8-d93b0b8f852d` | `88d5be02df6374c7ede2c08a8de464fe11f274686d58f85bb9fd5056ee4e982a` | PASS |
+| F03-auth-callback | 3 | `019fb70b-dbb9-7d93-b514-ada16ec236b7` | `de2f0fb8861f1f3e8a5141b2b2e2f16b056d77dafa5cb724acf4f3c0611c1f84` | PASS |
+| F04-baas-oracle | 1 | `019fb70e-a019-7bd0-b19b-e1110357ea89` | `e3c9e4846db21315bb3a6193a9a6c2eab9c904c8851eb868d2850e8098d0d434` | PASS |
+| F04-baas-oracle | 2 | `019fb70e-a06c-7ad3-9f3c-d70c79cd0824` | `e16090b398c31563d35e7d9d5ce341979f4fff15ea52c6d047311f47979d1021` | PASS |
+| F04-baas-oracle | 3 | `019fb70e-a052-71e3-bd79-95073b0bd143` | `4d21e11388896cdbfdfc86f687f020b3a2d7820fdd59d0076c732d8eb5309809` | PASS |
+| F05-supply-release | 1 | `019fb70b-d748-7b51-afec-217ce90646d7` | `4c7b0796d4b2d2113260cec2bd850cd1237357ca21d06d53456fb7ab3aac15b9` | PASS |
+| F05-supply-release | 2 | `019fb70c-fec0-7723-ab37-9e12b8ffe73f` | `2607ce85dfc30e803eaa39f2166d7167f20fc813f3c9b32c08b73a8803b375da` | PASS |
+| F05-supply-release | 3 | `019fb70e-472a-74d0-99a1-e018cada5755` | `5204b721c5e13ab5b53730077652034e0009c13d03a6db5781fcfe7c76233e3c` | FAIL |
+| F06-authority-mcp | 1 | `019fb711-3122-73b0-8a3b-32930d55e8ae` | `b5be2edbeb596982d0d8dd08097b80bd50b27a16222a5139ad108eeec29db2a5` | PASS |
+| F06-authority-mcp | 2 | `019fb712-0556-7740-885f-704261de933d` | `56e7a707bd414dd9c428e63b394b81aead92e63224f1b05cfc43b4bc6950566b` | PASS |
+| F06-authority-mcp | 3 | `019fb712-ee84-7a63-a128-4640906d6a18` | `2306f3897b73488e5653d6def95643b31e52079529ab2c4c0d9882cb4dc97fdb` | PASS |
+| F07-child-location | 1 | `019fb70c-2da3-7e20-b94e-b978b0e8db38` | `068156e4f9db60d1eea6a4870725ef8701fe702237af4c98e46876e20343b81b` | PASS |
+| F07-child-location | 2 | `019fb70c-ef49-74c0-9989-f70278f8e172` | `1187fbce0247ec148cd332f6d6122e340368f35644654d494ff159efaa04f465` | FAIL |
+| F07-child-location | 3 | `019fb70d-b5d2-7ad1-a7a0-6907ff3188cc` | `3a492e345ebb41d0a7cde511c0925c398942d6a3bf07c83aed18a252959a1221` | PASS |

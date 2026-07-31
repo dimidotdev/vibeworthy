@@ -121,6 +121,11 @@ Claude. Builders need one honest orchestration layer that scales its questions a
 A complete VibeWorthy implementation now exists in the public canonical GitHub repository, including
 the Agent Skill, compact platform adapters, local preflight scanner, tests, CI and release workflows,
 license/provenance records, and release documentation. Candidate
+`f0b31e2fb95e677ba0c99c336a38cd80129aad8e` passed its focused F05 scanner proof,
+cross-platform CI, and release rehearsal, but its fresh full suite was rejected at 18/21. One response
+invented scanner diagnostics, another invented a Git invocation and exit code, and a third claimed
+workspace file absence without an inspection. The completed records show a general evidence-
+reconciliation gap rather than a scanner-only defect. Candidate
 `097a7bb1298b9e9ab3b8b6689cf364bb7a526030` passed cross-platform CI, exact-SHA technical review,
 and the release rehearsal, but was rejected by a focused F05 proof at 2/3 before the full suite: one
 response scanned a live session directory, omitted that invocation, and invented a later narrow
@@ -258,6 +263,13 @@ while linking to the full references for manual use.
   where exposed, full prompt, isolated starting artifact, at least three runs for nondeterministic
   behavior, required/prohibited rubric items, raw output, reviewer result, and the revision caused by a
   failure so another maintainer can reproduce the conclusion.
+- REQ-022 | must | Before every final response, the full skill and reduced adapter shall inventory and
+  reconcile every claim about executed tools or commands, stdout/stderr/diagnostics, results and exit
+  codes, versions, test/build/scan outcomes, and workspace presence/absence/count/content against an
+  adequately scoped completed record. Compound, failed, interrupted, or partial calls establish only
+  explicitly captured facts; unsupported claims shall be removed or labeled `not inspected` or
+  `unverified`, user-provided or artifact-reported statements shall remain distinctly labeled, and
+  current-state claims shall follow the last relevant recorded mutation or carry a time qualifier.
 
 ## Acceptance Criteria
 
@@ -345,14 +357,20 @@ while linking to the full references for manual use.
 - AC-021 | REQ-021 | Given each forward-test scenario, when its evidence is reviewed, then the record
   includes commit, platform/model/version, prompt, clean starting artifact, three runs, required and
   prohibited rubric, raw outputs, reviewer decision, and any resulting skill revision.
+- AC-022 | REQ-022 | Given tool records that omit a Git invocation, contain no alleged diagnostic, or
+  contain no adequately scoped file inspection, when a response is drafted, then it does not claim
+  that the command ran or returned an exit, that the diagnostic was emitted, or that a file was absent.
+  It instead preserves the source label and uses `not inspected` or `unverified` where appropriate in
+  prose, tables, release ledgers, and action summaries.
 
 ## Product and Design
 
 - Primary flow: start with the user's intended outcome, select `explore`, `prototype`, or `ship`, show
   only the next highest-leverage question/gate, and end with a decision plus concrete next action.
 - Empty/loading/error/recovery: missing evidence becomes a labeled assumption and experiment; missing
-  tools become `manual check`, not pass; scan errors return a distinct exit code and remediation; an
-  interrupted workflow resumes from recorded evidence rather than restarting scope discovery.
+  tools become `manual check`, not pass; uninspected evidence remains `not inspected` or `unverified`
+  rather than `absent`; scan errors return a distinct exit code and remediation; an interrupted
+  workflow resumes from recorded evidence rather than restarting scope discovery.
 - Keyboard and focus: N/A — the skill has no custom graphical interface; generated product work must
   define keyboard/focus behavior under REQ-005, and the article uses existing accessible site controls.
 - Responsive and content extremes: skill output must remain scannable in chat, avoid giant checklists,
@@ -555,6 +573,15 @@ while linking to the full references for manual use.
   proof followed by a fresh 21/21 suite. Evidence: `tests/forward/invalid-evidence.md` and
   `tests/forward/raw-invalid/097a7bb-focal/`; decisive event SHA-256
   `d10e457b63f103269c63fbac9e0ede2f698851d644f1631fe398b6d181b94088`.
+- AUDIT-HIST-018 | failed | The frozen 21-response suite rejected candidate
+  `f0b31e2fb95e677ba0c99c336a38cd80129aad8e` at 18/21 despite its earlier focused F05 proof,
+  green cross-platform CI, and green release rehearsal. F03 run 1 attributed diagnostics to a scanner
+  record that contained none; F05 run 3 invented `git rev-parse HEAD` and exit `128`; F07 run 2
+  asserted file absence without any workspace inspection. All 21 responses and the three decisive
+  completed records are preserved. The other 18 passes and all earlier technical evidence are
+  non-transferable; the next candidate requires a fresh multi-scenario focused proof and a fresh
+  21/21 suite. Evidence: `tests/forward/invalid-evidence.md` and
+  `tests/forward/raw-invalid/f0b31e2/`.
 - REVIEW-005 | security | planned | reviewer: pending independent reviewer | evidence: fresh
   adversarial audit against the exact next candidate; require no material findings before forward
   evaluation.
@@ -607,6 +634,9 @@ while linking to the full references for manual use.
   human review and independent negative evidence before release.
 - TEST-021 | planned | Validate every forward-test record against the reproducibility rubric and retain
   three raw isolated runs per nondeterministic scenario.
+- TEST-022 | planned | Forward-test F03, F05, and F07 three times each and reconcile every command,
+  diagnostic, exit-code, and file-presence claim against the completed event stream before running a
+  fresh full suite; retain decisive failed records and require no unsupported workspace fact.
 
 | Requirement | Acceptance | Verification | Status |
 | --- | --- | --- | --- |
@@ -631,6 +661,7 @@ while linking to the full references for manual use.
 | REQ-019 | AC-019 | TEST-019 | planned |
 | REQ-020 | AC-020 | TEST-020 | planned |
 | REQ-021 | AC-021 | TEST-021 | planned |
+| REQ-022 | AC-022 | TEST-022 | planned |
 
 ## Decisions
 
@@ -730,6 +761,12 @@ while linking to the full references for manual use.
   reconciliation did not reliably prevent a compound command from scanning a live directory or a
   missing narrow result from being reconstructed. An invalid broad scan remains visible regardless
   of exit `0` or a later pass. | affects: REQ-010, REQ-012, REQ-021
+- DEC-022 | Require a general pre-response tool and workspace evidence inventory outside the scanner
+  protocol. | rationale: candidate `f0b31e2` followed the scanner protocol but still invented a
+  diagnostic, a Git command/exit, and uninspected file absence in separate scenarios. Every factual
+  claim in prose, tables, ledgers, and action summaries must therefore bind to an adequately scoped
+  completed record, while user-provided and artifact-reported statements keep their source labels. |
+  affects: REQ-012, REQ-021, REQ-022
 
 ## Open Questions
 
