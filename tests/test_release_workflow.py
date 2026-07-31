@@ -39,7 +39,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("permissions: {}", self.workflow)
         self.assertRegex(
             self.workflow,
-            r"(?m)^    permissions:\n      contents: read\n      id-token: write\n"
+            r"(?m)^    permissions:\n      actions: read\n      contents: read\n      id-token: write\n"
             r"      attestations: write$",
         )
         self.assertRegex(
@@ -52,6 +52,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(1, promotion_block.count("contents: write"))
         self.assertNotIn("releases: write", self.workflow)
         self.assertNotIn("pull_request_target", self.workflow)
+
+    def test_release_requires_successful_ci_for_the_exact_candidate(self) -> None:
+        self.assertIn("actions: read", self.workflow)
+        self.assertIn("actions/workflows/ci.yml/runs?head_sha=${candidate_commit}", self.workflow)
+        self.assertIn('.head_sha == \\"${candidate_commit}\\"', self.workflow)
+        self.assertIn('.conclusion == \\"success\\"', self.workflow)
+        self.assertIn(
+            "Release requires a successful CI workflow run for the exact candidate commit.",
+            self.workflow,
+        )
 
     def test_every_action_is_pinned_to_the_resolved_full_sha(self) -> None:
         expected = {

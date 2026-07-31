@@ -3,7 +3,16 @@
 This corpus tests whether VibeWorthy changes an agent's behavior in ambiguous, adversarial, and
 release-sensitive situations. It is a behavior evaluation, not a benchmark of the host model.
 
-## Frozen protocol
+> **Historical protocol.** The 21-run corpus below belongs to the superseded market, engineering,
+> and security experiment in `specs/vibeworthy-v1.md`. It is retained for provenance and regression
+> research, but it is not the `v1.0.0` release gate for the lean security skill. The active lean
+> contract uses one fresh synthetic scenario for each `quick`, `guarded`, and `critical` intensity;
+> its exact prompts, fixture snapshots, evaluator identities, hashes, observed responses, replayed
+> checks, and limitations are recorded in
+> `docs/audits/2026-07-31-lean-forward-tests.md`. Do not infer a current 21/21 requirement or rerun
+> this archived harness unless a separately approved research question needs it.
+
+## Archived frozen protocol
 
 - Evaluate the exact recorded skill commit in a fresh, isolated directory.
 - Provide only the matching prompt, matching `ARTIFACT.md`, and files from that commit.

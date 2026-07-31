@@ -30,6 +30,7 @@ jobs:
       tag_name: ${{ steps.prepare.outputs.tag_name }}
       version: ${{ steps.prepare.outputs.version }}
     permissions:
+      actions: read
       contents: read
       id-token: write
       attestations: write
@@ -46,6 +47,7 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_CANDIDATE: ${{ inputs.candidate_commit }}
         run: |
@@ -112,6 +114,16 @@ jobs:
           fi
           if [[ "$candidate_commit" != "$release_commit" ]]; then
             echo "Candidate commit must exactly match the release commit and tag target." >&2
+            exit 1
+          fi
+
+          ci_successes="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${candidate_commit}&status=completed&per_page=100" \
+              --jq "[.workflow_runs[] | select(.head_sha == \"${candidate_commit}\" and .conclusion == \"success\")] | length"
+          )"
+          if [[ ! "$ci_successes" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Release requires a successful CI workflow run for the exact candidate commit." >&2
             exit 1
           fi
 

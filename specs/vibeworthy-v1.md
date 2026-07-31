@@ -1,7 +1,7 @@
 ---
 spec: SPEC-VIBEWORTHY-V1-0001
 title: "VibeWorthy portable market, engineering, and security skill"
-status: implemented
+status: superseded
 profile: critical
 mode: deliver
 owner: "dimidotdev"
@@ -10,6 +10,10 @@ updated: 2026-07-31
 ---
 
 # VibeWorthy portable market, engineering, and security skill
+
+> Superseded on 2026-07-31 by
+> [`SPEC-VIBEWORTHY-LEAN-V1-0002`](vibeworthy-lean-v1.md). This document preserves the earlier
+> market/engineering/security experiment and its audit trail; it is no longer the release contract.
 
 ## Context and Evidence
 
